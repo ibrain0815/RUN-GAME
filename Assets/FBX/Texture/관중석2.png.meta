@@ -1,0 +1,115 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+
+namespace Unity.VisualScripting
+{
+    // The advantage of this class is not to provide list accessors
+    // for merged lists (which would be confusing), but rather that unlike
+    // merged collection, it can provide a zero-allocation enumerator.
+
+    // OPTIM note: Dictionary<,>.Values allocated memory the first time, so avoid it if possible
+    public class MergedList<T> : IMergedCollection<T>
+    {
+        public MergedList()
+        {
+            lists = new Dictionary<Type, IList<T>>();
+        }
+
+        protected readonly Dictionary<Type, IList<T>> lists;
+
+        public int Count
+        {
+            get
+            {
+                int count = 0;
+
+                foreach (var listByType in lists)
+                {
+                    count += listByType.Value.Count;
+                }
+
+                return count;
+            }
+        }
+
+        public bool IsReadOnly => false;
+
+        public virtual void Include<TI>(IList<TI> list) where TI : T
+        {
+            lists.Add(typeof(TI), new VariantList<T, TI>(list));
+        }
+
+        public bool Includes<TI>() where TI : T
+        {
+            return Includes(typeof(TI));
+        }
+
+        public bool Includes(Type elementType)
+        {
+            return GetListForType(elementType, false) != null;
+        }
+
+        public IList<TI> ForType<TI>() where TI : T
+        {
+            return ((VariantList<T, TI>)GetListForType(typeof(TI))).implementation;
+        }
+
+        protected IList<T> GetListForItem(T item)
+        {
+            Ensure.That(nameof(item)).IsNotNull(item);
+
+            return GetListForType(item.GetType());
+        }
+
+        protected IList<T> GetListForType(Type type, bool throwOnFail = true)
+        {
+            if (lists.ContainsKey(type))
+            {
+                return lists[type];
+            }
+
+            foreach (var listByType in lists)
+            {
+                if (listByType.Key.IsAssignableFrom(type))
+                {
+                    return listByType.Value;
+                }
+            }
+
+            if (throwOnFail)
+            {
+                throw new InvalidOperationException($"No sub-collection available for type '{type}'.");
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        public bool Contains(T item)
+        {
+            return GetListForItem(item).Contains(item);
+        }
+
+        public virtual void Add(T item)
+        {
+            GetListForItem(item).Add(item);
+        }
+
+        public virtual void Clear()
+        {
+            foreach (var listByType in lists)
+            {
+                listByType.Value.Clear();
+            }
+        }
+
+        public virtual bool Remove(T item)
+        {
+            return GetListForItem(item).Remove(item);
+        }
+
+        public void CopyTo(T[] array, int arrayIndex)
+        {
+       

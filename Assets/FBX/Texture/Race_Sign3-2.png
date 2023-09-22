@@ -1,0 +1,2620 @@
+using System.Collections.Generic;
+using System.Linq;
+using UnityEditor;
+using UnityEngine;
+
+namespace Unity.VisualScripting
+{
+    public sealed class Sidebar
+    {
+        public Sidebar(Sidebars sidebars, SidebarAnchor anchor)
+        {
+            this.sidebars = sidebars;
+            this.anchor = anchor;
+
+            e = new EventWrapper(this);
+        }
+
+        [DoNotSerialize]
+        private Sidebars sidebars { get; }
+
+        [DoNotSerialize]
+        private SidebarAnchor anchor { get; }
+
+        [DoNotSerialize]
+        private EventWrapper e { get; }
+
+        [DoNotSerialize]
+        public bool show => displayedPanels.Count > 0;
+
+        [DoNotSerialize]
+        private bool isResizing;
+
+        [Serialize]
+        private float size { get; set; } = 300;
+
+        [Serialize]
+        private Vector2 scroll;
+
+        [DoNotSerialize]
+        public readonly List<SidebarPanel> displayedPanels = new List<SidebarPanel>();
+
+        public void DrawLayout()
+        {
+            CacheDisplayedPanels();
+
+            if (!show)
+            {
+                return;
+            }
+
+            var position = GUILayoutUtility.GetRect(GUIContent.none, GUIStyle.none, GUILayout.Width(GetWidth()), GUILayout.ExpandHeight(true));
+
+            if (!e.IsLayout && !Event.current.ShouldSkip())
+            {
+                OnGUI(position);
+            }
+        }
+
+        public void Remove<T>() where T : ISidebarPanelContent
+        {
+            foreach (var panel in displayedPanels.Where(p => p.content is T))
+            {
+                panel.Disable();
+            }
+        }
+
+        private void CacheDisplayedPanels()
+        {
+            displayedPanels.Clear();
+            displayedPanels.AddRange(sidebars.panels.Where(p => p.enabled && p.anchor == anchor).OrderBy(p => p.order));
+        }
+
+        public float GetWidth()
+        {
+            foreach (var panel in displayedPanels)
+            {
+                size = Mathf.Max(size, panel.content.minSize.x);
+            }
+
+            return size;
+        }
+
+        private float GetHeight(float totalHeight)
+        {
+            var height = 0f;
+
+            for (int i = 0; i < displayedPanels.Count; i++)
+            {
+                var panel = displayedPanels[i];
+                var isLast = i == displayedPanels.Count - 1;
+
+                var minPanelHeight = panel.content.minSize.y;
+                panel.height = Mathf.Max(panel.height, minPanelHeight);
+
+                var panelHeight = panel.height;
+
+                if (isLast && height < totalHeight)
+                {
+                    var remainingHeight = totalHeight - height - 1;
+                    panelHeight = Mathf.Max(remainingHeight, minPanelHeight);
+                }
+
+                height += panelHeight;
+
+                height++; // Separator
+            }
+
+            return height;
+        }
+
+        public void OnGUI(Rect position)
+        {
+            HandleResizing(position);
+
+            if (Event.current.ShouldSkip(position))
+            {
+                return;
+            }
+
+            if (e.IsRepaint)
+            {
+                Styles.background.Draw(position, false, false, false, false);
+            }
+
+            if (anchor == SidebarAnchor.Left)
+            {
+                // leave space for scrolling after the potential scrollbar
+                position.width -= Styles.resizeGrip;
+            }
+
+            LudiqGUIUtility.BeginScrollablePanel(position, width => GetHeight(position.height), out Rect sidebarScrolledPosition, ref scroll);
+
+            var y = sidebarScrolledPosition.y;
+
+            for (int i = 0; i < displayedPanels.Count; i++)
+            {
+                var panel = displayedPanels[i];
+                var isLast = i == displayedPanels.Count - 1;
+
+                if (isLast)
+                {
+                    var remainingHeight = sidebarScrolledPosition.height - y - 1;
+                    var minPanelHeight = panel.content.minSize.y;
+                    var heightOverride = Mathf.Max(remainingHeight, minPanelHeight);
+                    panel.OnGUI(sidebarScrolledPosition, ref y, heightOverride);
+                }
+                else
+                {
+                    panel.OnGUI(sidebarScrolledPosition, ref y);
+                }
+
+                if (e.IsRepaint)
+                {
+                    Styles.separator.Draw(sidebarScrolledPosition.VerticalSection(ref y, 1), false, false, false, false);
+                }
+            }
+
+            LudiqGUIUtility.EndScrollablePanel();
+
+            if (e.IsRepaint)
+            {
+                Styles.separator.Draw(new Rect(position.x, position.y, 1, position.height), false, false, false, false);
+            }
+        }
+
+        private void HandleResizing(Rect position)
+        {
+            Rect resizeArea;
+
+            switch (anchor)
+            {
+                case SidebarAnchor.Left:
+                    resizeArea = new Rect
+                        (
+                        position.xMax - Styles.resizeGrip,
+                        position.y,
+                        Styles.resizeGrip,
+                        position.height
+                        );
+                    break;
+
+                case SidebarAnchor.Right:
+                    resizeArea = new Rect
+                        (
+                        position.x,
+                        position.y,
+                        Styles.resizeGrip,
+                        position.height
+                        );
+                    break;
+
+                default:
+                    throw new UnexpectedEnumValueException<SidebarAnchor>(anchor);
+            }
+
+            EditorGUIUtility.AddCursorRect(resizeArea, MouseCursor.SplitResizeLeftRight);
+
+            e.HandleCapture(resizeArea.Contains(e.mousePosition), false);
+
+            if (e.IsMouseDown(MouseButton.Left) && resizeArea.Contains(e.mousePosition))
+            {
+                isResizing = true;
+            }
+
+            if (isResizing && e.IsMouseUp(MouseButton.Left))
+            {
+                isResizing = false;
+            }
+
+            if (isResizing && e.IsMouseDrag(MouseButton.Left))
+            {
+                switch (anchor)
+                {
+                    case SidebarAnchor.Left:
+                        size = e.mousePosition.x - position.xMin;
+                        break;
+
+                    case SidebarAnchor.Right:
+                        size = position.xMax - e.mousePosition.x;
+                        break;
+
+                    default:
+                        throw new UnexpectedEnumValueException<SidebarAnchor>(anchor);
+                }
+            }
+
+            e.HandleRelease();
+        }
+
+        public void OrderSpinner(Rect position, SidebarPanel panel)
+        {
+            Ensure.That(nameof(panel)).IsNotNull(panel);
+
+            EditorGUIUtility.AddCursorRect(position, MouseCursor.Arrow);
+
+            var isFirst = displayedPanels.FirstOrDefault() == panel;
+            var isLast = displayedPanels.LastOrDefault() == panel;
+
+            var orderIncrement = -LudiqGUI.Spinner(position, !isFirst, !isLast);
+
+            if (orderIncrement == 0)
+            {
+                return;
+            }
+
+            if (orderIncrement == +1)
+            {
+                foreach (var otherPanel in displayedPanels)
+                {
+                    if (otherPanel != panel && otherPanel.order >= panel.order)
+                    {
+                        panel.order = otherPanel.order;
+                        otherPanel.order--;
+                        break;
+                    }
+                }
+            }
+            else if (orderIncrement == -1)
+            {
+                foreach (var otherPanel in displayedPanels)
+                {
+                    if (otherPanel != panel && otherPanel.order <= panel.order)
+                    {
+                        panel.order = otherPanel.order;
+                        otherPanel.order++;
+                        break;
+                    }
+                }
+            }
+
+            CacheDisplayedPanels();
+        }
+
+        private static class Styles
+        {
+            public static readonly GUIStyle background;
+            public static readonly GUIStyle separator;
+            public static readonly float resizeGrip = 2f;
+
+            static Styles()
+            {
+                background = ColorPalette.unityBackgroundMid.CreateBackground();
+                separator = ColorPalette.unityBackgroundDark.CreateBackground();
+            }
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     INDX( 	 Ø:Q           (     Ë         s                   >á    Ä p     Ωì    ¢~ëÁÏŸ–±‚˘ùØŸM
+ÁÏŸ3rÀ$ËÏŸ0      0               I S i d e b a r P a n e l C o n t e n t . c s øì    ê z     Ωì    bGtW¿ÏŸ PõÓÇ§Ÿ á¿‰ŸotW¿ÏŸ¯       Û                I S i d e b a r P a n e l C o n t e n t . c s . m e t a       ¿ì    h V     Ωì    ≥™tW¿ÏŸ PõÓÇ§Ÿ<Óá¿‰Ÿπ—tW¿ÏŸ 0      k!              
+ S i d e b a r . c s   ¡ì    p `     Ωì    ≥&uW¿ÏŸ PõÓÇ§Ÿ=Cá¿‰ŸÇ9uW¿ÏŸ¯       Û               S i d e b a r . c s . m e t a <á    x b     Ωì    ÁCëÁÏŸ–±‚˘ùØŸM
+ÁÏŸÜÀ$ËÏŸp       j                S i d e b a r A n c h o r . c s . m e √ì    Ä l     Ωì    e⁄uW¿ÏŸ PõÓÇ§Ÿ(Bá¿‰ŸrvW¿ÏŸ¯       Û                S i d e b a r A n c h o r . c s . m e t a     ƒì    p `     Ωì    ZOvW¿ÏŸ PõÓÇ§Ÿ'á¿‰ŸRvvW¿ÏŸ        B               S i d e b a r P a n e l . c s ≈ì    Ä j     Ωì    ∫ÆvW¿ÏŸ PõÓÇ§Ÿ8oá¿‰ŸØ’vW¿ÏŸ¯       Û                S i d e b a r P a n e l . c  . m e t a       Bá    Ä l     Ωì    #ÕëÁÏŸp8‰˘ùØŸM
+ÁÏŸDôÀ$ËÏŸ       ˙               S i d e b a r P a n e l W i n d o w . c s . m «ì    à v     Ωì    ƒnwW¿ÏŸ PõÓÇ§Ÿhá¿‰ŸÀïwW¿ÏŸ¯       Û                S i d e b a r P a n e l W i n d o w . c s . m e t a   @á    h X     Ωì    ¢~ëÁÏŸp8‰˘ùØŸM
+ÁÏŸ3rÀ$ËÏŸ       }               S i d e b a r s . c s …ì    x b     Ωì    ö&xW¿ÏŸ PõÓÇ§Ÿ–ê	á¿‰Ÿ†MxW¿ÏŸ¯       Û                S i d e b a r s . c s . m e t a                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       using UnityEditor;
+using UnityEngine;
+
+namespace Unity.VisualScripting
+{
+    public sealed class SidebarPanel
+    {
+        public SidebarPanel(ISidebarPanelContent content)
+        {
+            Ensure.That(nameof(content)).IsNotNull(content);
+
+            this.content = content;
+        }
+
+        [DoNotSerialize]
+        public Sidebars sidebars { get; set; }
+
+        [DoNotSerialize]
+        public Sidebar sidebar => sidebars[anchor];
+
+        [DoNotSerialize]
+        public bool enabled { get; private set; }
+
+        [Serialize]
+        private object controlHint;
+
+        [Serialize]
+        public float height { get; set; }
+
+        [Serialize]
+        public SidebarAnchor anchor { get; set; }
+
+        [Serialize]
+        private Vector2 scroll;
+
+        [Serialize]
+        public int order { get; set; }
+
+        [DoNotSerialize]
+        private EventWrapper e;
+
+        [DoNotSerialize]
+        private ISidebarPanelContent _content;
+
+        [DoNotSerialize]
+        public ISidebarPanelContent content
+        {
+            get => _content;
+            private set
+            {
+                _content = value;
+                controlHint = content?.sidebarControlHint;
+                e = new EventWrapper(controlHint);
+                enabled = content != null;
+            }
+        }
+
+        [DoNotSerialize]
+        private bool isResizing;
+
+        public bool TryAssociate(ISidebarPanelContent content)
+        {
+            if (content.sidebarControlHint == controlHint)
+            {
+                this.content = content;
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        public void Disable()
+        {
+            _content = null;
+            enabled = false;
+        }
+
+        public void OnGUI(Rect position, ref float y, float? heightOverride = null)
+        {
+            if (content == null)
+            {
+                var message = "Missing sidebar content.";
+                var messageType = MessageType.Warning;
+                var messageHeight = LudiqGUIUtility.GetHelpBoxHeight(message, messageType, position.width);
+                EditorGUI.HelpBox(position.VerticalSection(ref y, messageHeight), message, messageType);
+                return;
+            }
+
+            var height = heightOverride ?? this.height;
+
+            var panelPosition = new Rect
+                (
+                position.x,
+                y,
+                position.width,
+                height
+                );
+
+            var titlePosition = new Rect
+                (
+                position.x,
+                y,
+                position.width,
+                Styles.title.fixedHeight
+                );
+
+            if (e.IsRepaint)
+            {
+                Styles.title.Draw(titlePosition, content.titleContent, false, false, false, false);
+            }
+
+            var orderSpinnerPosition = new Rect
+                (
+                position.xMax - Styles.orderSpinnerWidth,
+                y,
+                Styles.orderSpinnerWidth,
+                titlePosition.height
+                );
+
+            sidebar.OrderSpinner(orderSpinnerPosition, this);
+
+            var anchorButtonPosition = new Rect
+                (
+                orderSpinnerPosition.x - Styles.anchorButtonWidth,
+                y,
+                Styles.anchorButtonWidth,
+                titlePosition.height
+                );
+
+            DrawAnchorButton(anchorButtonPosition);
+
+            y += titlePosition.height;
+
+            var panelContentPosition = new Rect
+                (
+                position.x,
+                y,
+                position.width,
+                height - titlePosition.height
+                );
+
+            if (e.IsRepaint)
+            {
+                Styles.background.Draw(panelContentPosition, false, false, false, false);
+            }
+
+            LudiqGUIUtility.BeginScrollablePanel(panelContentPosition, content.GetHeight, out var panelInnerPosition, ref scroll, new RectOffset(1, 1, 0, 0));
+
+            content.OnGUI(panelInnerPosition);
+
+            LudiqGUIUtility.EndScrollablePanel();
+
+            y += panelContentPosition.height;
+
+            if (heightOverride == null)
+            {
+                HandleResize(panelPosition);
+            }
+        }
+
+        private void DrawAnchorButton(Rect position)
+        {
+            SidebarAnchor destination;
+            EditorTexture icon;
+
+            switch (anchor)
+            {
+                case SidebarAnchor.Left:
+                    destination = SidebarAnchor.Right;
+                    icon = BoltCore.Icons.sidebarAnchorRight;
+                    break;
+
+                case SidebarAnchor.Right:
+                    destination = SidebarAnchor.Left;
+                    icon = BoltCore.Icons.sidebarAnchorLeft;
+                    break;
+
+                default:
+                    throw new UnexpectedEnumValueException<SidebarAnchor>(anchor);
+            }
+
+            if (GUI.Button(position, icon?.Single(), LudiqStyles.toolbarButton))
+            {
+                anchor = destination;
+            }
+        }
+
+        private void HandleResize(Rect panelPosition)
+        {
+            var resizeArea = new Rect
+                (
+                panelPosition.x,
+                panelPosition.yMax - (Styles.resizeGrip / 2),
+                panelPosition.width - Styles.orderSpinnerWidth,
+                Styles.resizeGrip
+                );
+
+            EditorGUIUtility.AddCursorRect(resizeArea, MouseCursor.ResizeVertical);
+
+            e.HandleCapture(resizeArea.Contains(e.mousePosition), false);
+
+            if (e.IsMouseDown(MouseButton.Left) && resizeArea.Contains(e.mousePosition))
+            {
+                isResizing = true;
+            }
+
+            if (isResizing && e.IsMouseUp(MouseButton.Left))
+            {
+                isResizing = false;
+            }
+
+            if (isResizing && e.IsMouseDrag(MouseButton.Left))
+            {
+                height = e.mousePosition.y - panelPosition.y;
+            }
+
+            e.HandleRelease();
+        }
+
+        private static class Styles
+        {
+            public static readonly GUIStyle background;
+            public static readonly GUIStyle title;
+            public static readonly float resizeGrip = 14f;
+            public static readonly float orderSpinnerWidth = LudiqGUIUtility.scrollBarWidth;
+            public static readonly float anchorButtonWidth = 22;
+
+            static Styles()
+            {
+                background = ColorPalette.unityBackgroundLight.CreateBackground();
+
+                title = new GUIStyle(EditorStyles.toolbar);
+                title.fontSize = 11;
+                title.alignment = TextAnchor.MiddleLeft;
+                title.padding = new RectOffset(4, 4, 0, 0);
+                title.imagePosition = ImagePosition.ImageLeft;
+                title.fixedHeight = 18;
+            }
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              “ÙÜ`>¨s“»ï⁄9àm“ÙÜ`>¨s“»ï⁄ò#Ê√DãÔ`>¨s“≤ÚC\∫	zDãÔ`>¨s“≤ÚC\÷Á˛”Cûe>¨s“ûzqÙd«Cûe>¨s“ûzqcã%Cûe>¨s“Ò™fÊ1ÕCûe>¨s“Ò™@wBÚ∫ùÄ>¨s“»ï⁄p≠∫ùÄ>¨s“»ï⁄Í–§=É!œ>¨s“Ò™U›Ê8É!œ>¨s“Ò™ﬁØÂVÉ!œ>¨s“ûzqákæÉ!œ>¨s“ûzqé„Á»W·>¨s“©€Ä±Î˝»W·>¨s“ÙpãÕ±Î˝ ØŒ∂R”ÈüêÓPK§∞ê¸’[´¶ßnXÆˆ/‡¢"›wŸõº&ÌÔ2T|TwD›wŸnáÇI«TwD›wŸÂ|a≥“´\kTwD›wŸ∞äµ“´\kŒx†›wŸú∫πÆ«ìóuŒx†›wŸWZñeJFõ]µi∫›wŸõº&Ì˘0|Ã]µi∫›wŸõº&Ì¸lÌ˛Î∂OΩ úŸõº&ÌRÀÕyÎ∂OΩ úŸõº&Ì;◊NˆS ú” úŸ®◊Pê…aH¿‰A˙ úŸ«¶õT√84
+L‡ÊŸv¥DÂe*ÛzÄÇ6L‡ÊŸÜD†˙PNDÂ«{π8L‡ÊŸÏfù¨5∂†w› =L‡ÊŸ[_Ù>7ªD˘∏æ>L‡ÊŸLŸ¥Ø¸c—JÔµÂsL‡ÊŸ;Úó2Ñ#lt¯µàL‡ÊŸx˚ ≈.ãG’lîL‡ÊŸf™VÍ8‘ˇﬂàãü8€<Íˆ<0Õ[ﬂàãü8€<Íˆ<LÎãÖÇG±∑ÓF€i4∆K`‘Jk¯∫™Kä%q‹U]å±íAg	’ø´√]ﬁ5h?¨—Ö¸&;fkÒg8ﬂã{ËRS&;fkÒg8ﬂÛé‰’t¨2[ë…Ç=·qı˝6–òÈo2[ë…Ç=·qı˝6Dás¢’∫#[Ñ«·“\
+¶Æâo’∫#[Ñ«·“\
+¶«‚ˇˇÊ‰?9„3˙]Å.ºHˇÊ‰?9„|pO≤üb™ä≤täÜÿÊõº&Ì∆pIÄ†õ˛¸ÜÿÊõº&Ì9î¿†õ˛¸ÜÿÊõº&ÌˆP≤»9±u{;∏ÁIÄ:π“àA9±u{;∏ÁIÄ:π!=p’[Zÿ}d3aÈ)aèwÉ‡Çämn‚oÈõº&Ì∏ÊÙ?ämn‚oÈõº&Ì´°«ı∞•Æ	n‚oÈ÷®ÿ@5yé∞•Æ	n‚oÈ≠ç©Õ5yé#–q2§ öÈ»ï⁄±§≥⁄#–q2§ öÈ»ï⁄fbâﬁi?°∞‰ÒÎG°≥≤ûl3ü˙I'jˇ¬Ï'âÂcv›Õ@ójˇ¬Ïõº&Ì±P›Õ@ójˇ¬Ïõº&Ìê4d_ˆÃë≥jˇ¬Ïõº&ÌÌkT9Ù“Æ/ö≥ÌKªN¯2$Kó6Ì˘Û“ìCÓ=Ä‡˛ﬂä›jó TÓõ µi5ö≥=≈E™Ó1cWháM ö≥=≈E™Ó®◊Pê“Ø‘1ö≥=≈E™Óõº&ÌVKSö≥=≈E™Óú∫πÆåêtÇö≥=≈E™ÓWZñeHæ∞˙’∫#[‡≤LÔÜ$üÆâo’∫#[‡≤LÔÜ$ü«‚ˇ&;fk‡≤LÔ¯Ωä≠RS&;fk‡≤LÔ‹›±‰’t¨π"p‡≤LÔs`cﬁ‰Ñπ"p‡≤LÔìÀsﬁ‰Ñπ"p‡≤LÔv˘2àD(∂π"p‡≤LÔ”⁄¨WàD(∂®.'È\±ÃÔaËÙ7À"|®.'È\±ÃÔL¥j7ç£Í≥÷GôÉ·çÚ“¯ûB—≤lçıô∑´É·çÚ∏¿0∆ª§’¥◊„¿É·çÚÕﬁW®nE	cYaW/˘É“Ù&>ÁC˜,U&é¬Q˘;tßÖ¨ig˜,U&é¬Q˘XÜ!õ¨iguTxBŸá˙ﬁu=êM’Í    ù#m NX¬4yÂ™—íM                cöŸÄ›TÃQıbÊt∑5ê   òó      òó                  Ñó      |ó      tó     ló      Ê;¶ùa¯ù˝#*º_Ï’                cöŸÄ›TÃQıbÊt∑5ê   4ó      4ó                   ó      ó      ó     ó      @*&x∞v˚x(ócS›X                cöŸÄ›TÃQıbÊt∑5ê   –ñ      –ñ                  ºñ      ¥ñ      ¨ñ     §ñ      DˇM4y©<RÌÿ∑]íKp                cöŸÄ›TÃQıbÊt∑5ê   lñ      lñ                  Xñ      Pñ      Hñ     @ñ      gíÇ4y©<RÌÿ∑d'Aõ                cöŸÄ›TÃQıbÊt∑5ê   ñ      ñ                  Ùï      Ïï      ‰ï     ‹ï      ÅlíÁ˝ì‹Èm£çç9-                cöŸÄ›TÃQıbÊt∑5ê   §ï      §ï                  êï      àï      Äï     xï      ®0ﬁ∆ÑJkã‹Z {ÕÒk                cöŸÄ›TÃQıbÊt∑5ê   @ï      @ï                  ,ï      $ï      ï     ï      §û}ÊJÈCvùÜ?Ö¡                cöŸÄ›TÃQıbÊt∑5ê   ‹î      ‹î                  »î      ¿î      ∏î     ∞î      èNå√ÎrÍ=9eS√~iË                cöŸÄ›TÃQıbÊt∑5ê   xî      xî                  dî      \î      Tî     Lî      à‹uAø™0Ó–6H«5ª                cöŸÄ›TÃQıbÊt∑5ê   î      î                   î      ¯ì      ì     Ëì      pˆQ8ß?QK
+]v7gÊ                cöŸÄ›TÃQıbÊt∑5ê   ∞ì      ∞ì                  úì      îì      åì     Ñì      ‹˜åÖYÓÏª˚d…S¶ ÷W                cöŸÄ›TÃQıbÊt∑5ê   Lì      Lì                  8ì      0ì      (ì      ì      olRwÆΩ¡˝Ø∫PùWc4                cöŸÄ›TÃQıbÊt∑5ê   Ëí      Ëí                  ‘í      Ãí      ƒí     ºí      ¶¬Â‹ÆΩ¡˝Ø∫Pö„πe                cöŸÄ›TÃQıbÊt∑5ê   Ñí      Ñí                  pí      hí      `í     Xí      fT/ˆYÏ!2~˛≥“jLÜî                cöŸÄ›TÃQıbÊt∑5ê    í       í                  í      í      ¸ë     Ùë      fT/ˆYÏ!2~˛≥“jLÜî                cöŸÄ›TÃQıbÊt∑5ê   ºë      ºë                  ®ë      †ë      òë     êë      Ò⁄ƒ∑É6ØÛëê∞‹UÄˇ                cöŸÄ›TÃQıbÊt∑5ê   Xë      hë                  Të      Lë      Dë     <ë      r¥≥WÀåΩå4Ô L]*™`                cöŸÄ›TÃQıbÊt∑5ê   ë      ë                  ê      Ëê      ‡ê     ÿê      Ωâ/˚ë"˛~¢!?]Z—â                cöŸÄ›TÃQıbÊt∑5ê   †ê      ∞ê                  úê      îê      åê     Ñê      	<Ñ<⁄TAnc*Y™º                cöŸÄ›TÃQıbÊt∑5ê   Lê      Lê                  8ê      0ê      (ê      ê      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   Ëè      Ëè                  ‘è      Ãè      ƒè     ºè      à≈‰À8dÓøb>3 ı                cöŸÄ›TÃQıbÊt∑5ê   Ñè      Ñè                  pè      hè      `è     Xè      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê    è       è                  è      è      ¸é     Ùé      ÔÄEó$Vy∑û‚îì`                cöŸÄ›TÃQıbÊt∑5ê   ºé      ºé                  ®é      †é      òé     êé      3;I.Æ Q∂è(≠8Ãü                cöŸÄ›TÃQıbÊt∑5ê   Xé      Xé                  Dé      <é      4é     ,é      p¯l¨€¥4Ô Lú«Ê                cöŸÄ›TÃQıbÊt∑5ê   Ùç      Ùç                  ‡ç      ÿç      –ç     »ç      vìäØ}pbig)j–Væ|7                cöŸÄ›TÃQıbÊt∑5ê   êç      êç                  |ç      tç      lç     dç      M’…|Á`ÖÕ∂Èn∞Hh                cöŸÄ›TÃQıbÊt∑5ê   ,ç      ,ç                  ç      ç      ç      ç      ¥ˇ†AÂ·)õÓ™™¥èr\                cöŸÄ›TÃQıbÊt∑5ê   »å      »å                  ¥å      ¨å      §å     úå      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   då      då                  På      Hå      @å     8å      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê    å       å                  Ïã      ‰ã      ‹ã     ‘ã      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   úã      úã                  àã      Äã      xã     pã      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   8ã      8ã                  $ã      ã      ã     ã      ´é;SÔíù– óiG√                cöŸÄ›TÃQıbÊt∑5ê   ‘ä      ‘ä                  ¿ä      ∏ä      ∞ä     ®ä      À5OËı∫1ÊQÏBãuA                cöŸÄ›TÃQıbÊt∑5ê   pä      pä                  \ä      Tä      Lä     Dä      j‡í6§µoÂ‚óÆÎHe                cöŸÄ›TÃQıbÊt∑5ê   ä      ä                  ¯â      â      Ëâ     ‡â      ÆÁM˘v∏âë¢V¢1óXπ                cöŸÄ›TÃQıbÊt∑5ê   ®â      ®â                  îâ      åâ      Ñâ     |â      ∏≈WÅ¶ªΩ‚m‹el                cöŸÄ›TÃQıbÊt∑5ê   Dâ      Dâ                  0â      (â       â     â      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   ‡à      ‡à                  Ãà      ƒà      ºà     ¥à      º·™ô£\üõJ´sV                cöŸÄ›TÃQıbÊt∑5ê   |à      |à                  hà      `à      Xà     Pà      Zî$ïªΩRqÚ
+†êk                cöŸÄ›TÃQıbÊt∑5ê   à      à                  à      ¸á      Ùá     Ïá      Óú+"±óuıbÊt≠ëq„                cöŸÄ›TÃQıbÊt∑5ê   ¥á      ¥á                  †á      òá      êá     àá      ‹.X$¶\l¨™2Œ¶                cöŸÄ›TÃQıbÊt∑5ê   Pá      Pá                  <á      4á      ,á     $á      TdvËN¥ïΩóZBñ+                cöŸÄ›TÃQıbÊt∑5ê   ÏÜ      ÏÜ                  ÿÜ      –Ü      »Ü     ¿Ü      U¶œO>•‚ÿ¯IÆËá]Ω                cöŸÄ›TÃQıbÊt∑5ê   àÜ      àÜ                  tÜ      lÜ      dÜ     \Ü      ¡≈ΩFˆÉÌâBc0êJ0                cöŸÄ›TÃQıbÊt∑5ê   $Ü      $Ü                  Ü      Ü       Ü     ¯Ö      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   ¿Ö      ¿Ö                  ¨Ö      §Ö      úÖ     îÖ      ›[a¯ñıïl=˘∑ovâÌ                cöŸÄ›TÃQıbÊt∑5ê   \Ö      \Ö                  HÖ      @Ö      8Ö     0Ö      x£—Äy˛?.PZi-ıáË                cöŸÄ›TÃQıbÊt∑5ê   ¯Ñ      ¯Ñ                  ‰Ñ      ‹Ñ      ‘Ñ     ÃÑ      ˚¢±-(Qsˇäü2»Oœ]                cöŸÄ›TÃQıbÊt∑5ê   îÑ      îÑ                  ÄÑ      xÑ      pÑ     hÑ      õÆæ:∑uåC&W¨‘ê˜                cöŸÄ›TÃQıbÊt∑5ê   0Ñ      0Ñ                  Ñ      Ñ      Ñ     Ñ      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   ÃÉ      ÃÉ                  ∏É      ∞É      ®É     †É      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   hÉ      hÉ                  TÉ      LÉ      DÉ     <É      W˛ªm.»‹ÿÉ~T≈ò‰                cöŸÄ›TÃQıbÊt∑5ê   É      É                  Ç      ËÇ      ‡Ç     ÿÇ      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   †Ç      †Ç                  åÇ      ÑÇ      |Ç     tÇ      ·m∏∑›ÆÑE}ƒùö≈1É                cöŸÄ›TÃQıbÊt∑5ê   <Ç      <Ç                  (Ç       Ç      Ç     Ç      ‹/µ≤|ó∑ÑLŸL_≥¶*                cöŸÄ›TÃQıbÊt∑5ê   ÿÅ      ÿÅ                  ƒÅ      ºÅ      ¥Å     ¨Å      ⁄ô™>©ÁN™⁄¶IM≥A$Ç                cöŸÄ›TÃQıbÊt∑5ê   tÅ      tÅ                  `Å      XÅ      PÅ     HÅ      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   Å      Å                  ¸Ä      ÙÄ      ÏÄ     ‰Ä      “âÓ:}˝z2¡câŒ4                cöŸÄ›TÃQıbÊt∑5ê   ¨Ä      ¨Ä                  òÄ      êÄ      àÄ     ÄÄ      {Ωû>.˜¨;‹®…ÅeVX⁄                cöŸÄ›TÃQıbÊt∑5ê   HÄ      HÄ                  4Ä      ,Ä      $Ä     Ä      "Ù%rÃzJ)'y∆∆qı˘                cöŸÄ›TÃQıbÊt∑5ê   ‰      ‰                  –      »      ¿     ∏      ≠ïY(Áæv$Õ{!ÄÃgù                cöŸÄ›TÃQıbÊt∑5ê   Ä      Ä                  l      d      \     T      fT/ˆYÏ!2~˛≥“jLÜî                cöŸÄ›TÃQıbÊt∑5ê                                        ¯~     ~      ≈"ˆÉÕÍÖè5'ÂS^                cöŸÄ›TÃQıbÊt∑5ê   ∏~      ∏~                  §~      ú~      î~     å~      Ö>é"4=ufõ4Œ?¥A¥                cöŸÄ›TÃQıbÊt∑5ê   T~      d~                  P~      H~      @~     8~      
+yı	8Ë·ÉÁπ5I¸                cöŸÄ›TÃQıbÊt∑5ê    ~       ~                  Ï}      ‰}      ‹}     ‘}      Åñú0â≈∏˘˝Ñ#,”Ù                cöŸÄ›TÃQıbÊt∑5ê   ú}      ú}                  à}      Ä}      x}     p}      ˇ≠é¿IΩ¯ÄFı˛*dÃ                cöŸÄ›TÃQıbÊt∑5ê   8}      H}                  4}      ,}      $}     }      ?m˘ç≤´‘/"Y†Õx˙                cöŸÄ›TÃQıbÊt∑5ê   ‰|      Ù|                  ‡|      ÿ|      –|     »|      ü2∫LŒÈchŸ,∂ ì≥                cöŸÄ›TÃQıbÊt∑5ê   ê|      ê|                  ||      t|      l|     d|      ™x[9}`Zµ∏m«®˚                cöŸÄ›TÃQıbÊt∑5ê   ,|      ,|                  |      |      |      |      ®èï(äÂ;k«∫Pî+ì                cöŸÄ›TÃQıbÊt∑5ê   »{      »{                  ¥{      ¨{      §{     ú{      ZÁ¸¿B©˙|<˜°£¬                cöŸÄ›TÃQıbÊt∑5ê   d{      t{                  `{      X{      P{     H{      Ö|∏∏:5ºçBü¿ÃÖQ                cöŸÄ›TÃQıbÊt∑5ê   {      {                  ¸z      Ùz      Ïz     ‰z      !]ë—ﬂ†˚ﬁ6y›{gıÓú                cöŸÄ›TÃQıbÊt∑5ê   ¨z      ¨z                  òz      êz      àz     Äz      ≈Û±≥u5ÄçBü¿Ä> Z                cöŸÄ›TÃQıbÊt∑5ê   Hz      Hz                  4z      ,z      $z     z      ôqˆÈ≥"äß{ítéMµ√n                cöŸÄ›TÃQıbÊt∑5ê   ‰y      ‰y                  –y      »y      ¿y     ∏y      mÈ'ã∂jM∂·lÍì±l                cöŸÄ›TÃQıbÊt∑5ê   Äy      Äy                  ly      dy      \y     Ty      ñQ¡ﬂñ˛Ÿ8 /«+S                cöŸÄ›TÃQıbÊt∑5ê   y      y                  y       y      ¯x     x      ›»ﬂ‹fØ, Xüªv                cöŸÄ›TÃQıbÊt∑5ê   ∏x      ∏x                  §x      úx      îx     åx      ∆ï±XOƒΩ“ÃG≤2"ùÑ                cöŸÄ›TÃQıbÊt∑5ê   Tx      Tx                  @x      8x      0x     (x      }“—∫Ë4^ﬁÊÃ`î‹´                 cöŸÄ›TÃQıbÊt∑5ê   w      w                  ‹w      ‘w      Ãw     ƒw      Úà.? ¡‹Q^çl5wT⁄                cöŸÄ›TÃQıbÊt∑5ê   åw      åw                  xw      pw      hw     `w      º3€#˚eüÅqpäüœ&m                cöŸÄ›TÃQıbÊt∑5ê   (w      (w                  w      w      w     ¸v      fT/ˆYÏ!2~˛≥“jLÜî                cöŸÄ›TÃQıbÊt∑5ê   ƒv      ƒv                  ∞v      ®v      †v     òv      fT/ˆYÏ!2~˛≥“jLÜî                cöŸÄ›TÃQıbÊt∑5ê   `v      `v                  Lv      Dv      <v     4v      +¢ê3©Y‚!«…‹â~Nù                cöŸÄ›TÃQıbÊt∑5ê   ¸u      ¸u                  Ëu      ‡u      ÿu     –u      fT/ˆYÏ!2~˛≥“jLÜî                cöŸÄ›TÃQıbÊt∑5ê   òu      òu                  Ñu      |u      tu     lu      3^f√˘QLNö‚8¬¯                cöŸÄ›TÃQıbÊt∑5ê   4u      4u                   u      u      u     u      &`›Ã1˛§[Ωƒ◊¢ŸV3                cöŸÄ›TÃQıbÊt∑5ê   –t      –t                  ºt      ¥t      ¨t     §t      Ö?C†!≥cußF«≈Èﬁ                cöŸÄ›TÃQıbÊt∑5ê   lt      lt                  Xt      Pt      Ht     @t      ÚuÏ%¨º˜∑≥πÃè˙Ë                cöŸÄ›TÃQıbÊt∑5ê   t      t                  Ùs      Ïs      ‰s     ‹s      ˝älæ;Öx¥u§\                 cöŸÄ›TÃQıbÊt∑5ê   §s      §s                  ês      às      Äs     xs      U%SŒ#&È⁄Üh}MY                cöŸÄ›TÃQıbÊt∑5ê   @s      @s                  ,s      $s      s     s      ¸aŒ#&È⁄Ü˜}˜                cöŸÄ›TÃQıbÊt∑5ê   ‹r      ‹r                  »r      ¿r      ∏r     ∞r      KÊ›()òPÙdÓøb˙Rù                cöŸÄ›TÃQıbÊtÔªøThe MIT License (MIT)
+
+Copyright (c) Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy 
+of this software and associated documentation files (the "Software"), to deal 
+in the Software without restriction, including without limitation the rights 
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell 
+copies of the Software, and to permit persons to whom the Software is 
+furnished to do so, subject to the following conditions: 
+
+The above copyright notice and this permission notice shall be included in all 
+copies or substantial portions of the Software. 
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, 
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE 
+SOFTWARE.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     INDX( 	 Wˇ)           (   	  Ë      
+ i  n i o t           ì    x b     Õì    !áW¿ÏŸN`[ÁÏŸN`[ÁÏŸÖ‘$ËÏŸ                        A c k n o w l e d g e m e n t s . m e Œì    Ä l     Õì    ˝yW¿ÏŸ PõÓÇ§Ÿ{ÈÜ¿‰ŸB$zW¿ÏŸ∞       ¨                A c k n o w l e d g e m e n t s . m e t a     Ûì    h T     Õì    œ%àW¿ÏŸ@\ÁÏŸ@\ÁÏŸÖ‘$ËÏŸ                       	 A n a l y t i c s . m œì    p ^     Õì    æZzW¿ÏŸ PõÓÇ§Ÿ(ƒÂÜ¿‰ŸÄÇzW¿ÏŸ∞       ¨                A n a l y t 
+ c s . m e t a   ‘}    Ä n     Õì    SD?ÁÏŸ òÂ˘ùØŸëã^ÁÏŸDôÀ$ËÏŸ       ’               B o l t F l o w N a m e U t i l i t y . c s . —ì    à x     Õì    Ò{W¿ÏŸ PõÓÇ§Ÿ 6„Ü¿‰ŸÙ;{W¿ÏŸ¯       Û                B o l t F l o w N a m e U t i l i t y . c s . m e t a ˆì    h X     Õì    -_âW¿ÏŸe˝\ÁÏŸe˝\ÁÏŸ5Èù]ÈÏŸ                        C o n n e c t i o n s “ì    x b     Õì    ﬂâ{W¿ÏŸ PõÓÇ§Ÿ¿?“Ü¿‰Ÿ7§{W¿ÏŸ∞       ¨                C o n n e c t i o n s . m e t a       î   
+ h X     Õì    ó(èW¿ÏŸ¿≤^ÁÏŸ¿≤^ÁÏŸ5Èù]ÈÏŸ                        D e s c r i p t i o n ”ì    x b     Õì    €{W¿ÏŸ PõÓÇ§Ÿ„Î∏Ü¿‰Ÿx|W¿ÏŸ∞       ¨                D e s c r i p t i o n . m e t a       î    ` N     Õì    πxóW¿ÏŸ”v_ÁÏŸ”v_ÁÏŸΩù]ÈÏŸ                        E v e n t s . ‘ì    h X     Õì    rU|W¿ÏŸ PõÓÇ§Ÿ]ﬁ©Ü¿‰ŸTs|W¿ÏŸ∞       ¨                E v e n t s . m e t a ’ì    p \     Õì    W¡|W¿ÏŸ PõÓÇ§Ÿó‰®Ü¿‰ŸW¡|W¿ÏŸ P      ˆA               F l o w C a 
+ v a s . c s     ÷ì    x f     Õì    <}W¿ÏŸ PõÓÇ§ŸíÙ¶Ü¿‰Ÿî6}W¿ÏŸ¯       Û                F l o w C a n v a s . c s . m e t a   ’}    à t     Õì    sk?ÁÏŸê˜Ê˘ùØŸëã^ÁÏŸÁ¨À$ËÏŸ`      \               F l o w D r a g A n d D r o p U t i l i t y . c s . m ÿì    ê ~     Õì    ˜Ê}W¿ÏŸ PõÓÇ§Ÿbû§Ü¿‰Ÿ˜Ê}W¿ÏŸX       V                F l o w D r a g A n d D r o p U t i l i t y . c s . m e t a   ÿ}    Ä l     Õì    õÕ?ÁÏŸê˜Ê˘ùØŸÀ–`ÁÏŸÁ¨À$ËÏŸÄ      ~               F l o w E d 
+ t o r B i n d i n g s . c s . m ⁄ì    à v     Õì    Õæ~W¿ÏŸ PõÓÇ§Ÿ(∫°Ü¿‰ŸÕæ~W¿ÏŸ¯       Û                F l o w E d i t o r B i n d i n g s . c s . m e t a   ◊}    x h     Õì    õÕ?ÁÏŸê˜Ê˘ùØŸ°©`ÁÏŸ3rÀ$ËÏŸ                      F l o w G r a p h C o n t e x t . c s                     maW¿ÏŸ PõÓÇ§Ÿ„úüÜ¿‰ŸràW¿ÏŸ¯       Û                F l o w G r a p h C o n t e x t . c s . m e t a                     Õì    QMÅW¿ÏŸ PõÓÇ§Ÿ¢~+çÏŸ-^ÅW¿ÏŸ–       –                F l 
+ w M a c h i n e E d i t o r . c s       ‚ì    à t     Õì    CîÅW¿ÏŸ PõÓÇ§ŸOıòÜ¿‰ŸHªÅW¿ÏŸ¯       Û                F l o w M a c h i n e E d i t o r . c s . m e t a     „ì    p ^     Õì    ËÇW¿ÏŸ PõÓÇ§Ÿ\5ÒÖ¿‰ŸËÇW¿ÏŸ∞       ¨                F r a m e w o r k . m e t a   ‰ì    x b     Õì    ”_ÇW¿ÏŸ PõÓÇ§ŸÉŸÍÖ¿‰Ÿ”_ÇW¿ÏŸ∞       ¨                I n v o c a t i o n s . m e t a       Âì    p Z     Õì    m∂ÇW¿ÏŸ PõÓÇ§Ÿ@™—Ö¿‰Ÿ‚ÇW¿ÏŸ∞       ¨                O p t i o n s . m e 
+ a       Êì    h X     Õì    a1ÉW¿ÏŸ PõÓÇ§Ÿƒ‘sÖ¿‰Ÿa1ÉW¿ÏŸ∞       ¨                P l u g i n . m e t a Áì    h V     Õì    &¶ÉW¿ÏŸ PõÓÇ§ŸÖ'TÖ¿‰Ÿ&¶ÉW¿ÏŸ∞       ¨               
+ P o r t s . m e t a   Ëì    p `     Õì    ‚ÚÉW¿ÏŸ PõÓÇ§Ÿ‚PÖ¿‰ŸÚÑW¿ÏŸ∞       ¨                P r o p e r t i e s . m e t a Èì    x h     Õì    ·\ÑW¿ÏŸ PõÓÇ§Ÿ>¡~+çÏŸtrÑW¿ÏŸ       ”               R u n t i m e G r a p h B a s e . c s Íì    à r     Õì    ¶°ÑW¿ÏŸ PõÓÇ§Ÿ]ÆLÖ¿‰Ÿ˝ÀÑW¿ÏŸX     
+ V                R u n t i m e G r a p h B a s e . c s . m e t a       Îì    h V     Õì    Ä-ÖW¿ÏŸ PõÓÇ§ŸR◊>Ö¿‰ŸÄ-ÖW¿ÏŸ∞       ¨               
+ U n i t s . m e t a   Ïì    ® í     Õì    áoÖW¿ÏŸ PõÓÇ§Ÿ>›=Ö¿‰ŸèñÖW¿ÏŸ       “              ( U n i t y . V i s u a l S c r i p t i n g . F l o w . E d i t o r . a s m d e f                                                                                                                                                                           
+ using System;
+using System.Collections.Generic;
+using System.Linq;
+using UnityEditor;
+using UnityEngine;
+using UnityObject = UnityEngine.Object;
+
+namespace Unity.VisualScripting
+{
+    [Canvas(typeof(FlowGraph))]
+    public sealed class FlowCanvas : VisualScriptingCanvas<FlowGraph>
+    {
+        public FlowCanvas(FlowGraph graph) : base(graph) { }
+
+
+        #region Clipboard
+
+        public override void ShrinkCopyGroup(HashSet<IGraphElement> copyGroup)
+        {
+            copyGroup.RemoveWhere(element =>
+            {
+                if (element is IUnitConnection)
+                {
+                    var connection = (IUnitConnection)element;
+
+                    if (!copyGroup.Contains(connection.source.unit) ||
+                        !copyGroup.Contains(connection.destination.unit))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            });
+        }
+
+        #endregion
+
+
+        #region Window
+
+        public override void OnToolbarGUI()
+        {
+            showRelations = GUILayout.Toggle(showRelations, "Relations", LudiqStyles.toolbarButton);
+
+            EditorGUI.BeginChangeCheck();
+
+            BoltFlow.Configuration.showConnectionValues = GUILayout.Toggle(BoltFlow.Configuration.showConnectionValues, "Values", LudiqStyles.toolbarButton);
+
+            BoltCore.Configuration.dimInactiveNodes = GUILayout.Toggle(BoltCore.Configuration.dimInactiveNodes, "Dim", LudiqStyles.toolbarButton);
+
+            if (EditorGUI.EndChangeCheck())
+            {
+                BoltFlow.Configuration.Save();
+
+                BoltCore.Configuration.Save();
+            }
+
+            base.OnToolbarGUI();
+        }
+
+        #endregion
+
+
+        #region View
+
+        protected override bool shouldEdgePan => base.shouldEdgePan || isCreatingConnection;
+
+        public const float inspectorZoomThreshold = 0.7f;
+
+        #endregion
+
+
+        #region Lifecycle
+
+        public override void Close()
+        {
+            base.Close();
+
+            CancelConnection();
+        }
+
+        protected override void HandleHighPriorityInput()
+        {
+            if (isCreatingConnection)
+            {
+                if (e.IsMouseDown(MouseButton.Left))
+                {
+                    connectionEnd = mousePosition;
+                    NewUnitContextual();
+                    e.Use();
+                }
+                else if (e.IsFree(EventType.KeyDown) && e.keyCode == KeyCode.Escape)
+                {
+                    CancelConnection();
+                    e.Use();
+                }
+            }
+
+            base.HandleHighPriorityInput();
+        }
+
+        private void CompleteContextualConnection(IUnitPort source, IUnitPort destination)
+        {
+            source.ValidlyConnectTo(destination);
+            Cache();
+            var unitPosition = this.Widget<IUnitWidget>(destination.unit).position.position;
+            var portPosition = this.Widget<IUnitPortWidget>(destination).handlePosition.center.PixelPerfect();
+            var offset = portPosition - unitPosition;
+            destination.unit.position -= offset;
+            this.Widget(destination.unit).Reposition();
+            connectionSource = null;
+            GUI.changed = true;
+        }
+
+        public void NewUnitContextual()
+        {
+            var filter = UnitOptionFilter.Any;
+            filter.GraphHashCode = graph.GetHashCode();
+
+            if (connectionSource is ValueInput)
+            {
+                var valueInput = (ValueInput)connectionSource;
+                filter.CompatibleOutputType = valueInput.type;
+                filter.Expose = false;
+                filter.NoConnection = false;
+                NewUnit(mousePosition, GetNewUnitOptions(filter), (unit) => CompleteContextualConnection(valueInput, unit.CompatibleValueOutput(valueInput.type)));
+            }
+            else if (connectionSource is ValueOutput)
+            {
+                var valueOutput = (ValueOutput)connectionSource;
+                filter.CompatibleInputType = valueOutput.type;
+                filter.NoConnection = false;
+                NewUnit(mousePosition, GetNewUnitOptions(filter), (unit) => CompleteContextualConnection(valueOutput, unit.CompatibleValueInput(valueOutput.type)));
+            }
+            else if (connectionSource is ControlInput)
+            {
+                var controlInput = (ControlInput)connectionSource;
+                filter.NoControlOutput = false;
+                filter.NoConnection = false;
+                NewUnit(mousePosition, GetNewUnitOptions(filter), (unit) => CompleteContextualConnection(controlInput, unit.controlOutputs.First()));
+            }
+            else if (connectionSource is ControlOutput)
+            {
+                var controlOutput = (ControlOutput)connectionSource;
+                filter.NoControlInput = false;
+                filter.NoConnection = false;
+                NewUnit(mousePosition, GetNewUnitOptions(filter), (unit) => CompleteContextualConnection(controlOutput, unit.controlInputs.First()));
+            }
+        }
+
+        #endregion
+
+
+        #region Context
+
+        protected override void OnContext()
+        {
+            if (isCreatingConnection)
+            {
+                CancelConnection();
+            }
+            else
+            {
+                // Checking for Alt seems to lose focus, for some reason maybe
+                // unrelated to Bolt. Shift or other modifiers seem to work though.
+                if (base.GetContextOptions().Any() && (!BoltFlow.Configuration.skipContextMenu || e.shift))
+                {
+                    base.OnContext();
+                }
+                else
+                {
+                    NewUnit(mousePosition);
+                }
+            }
+        }
+
+        protected override IEnumerable<DropdownOption> GetContextOptions()
+        {
+            yield return new DropdownOption((Action<Vector2>)(NewUnit), "Add Node...");
+            yield return new DropdownOption((Action<Vector2>)(NewSticky), "Create Sticky Note");
+            foreach (var baseOption in base.GetContextOptions())
+            {
+                yield return baseOption;
+            }
+        }
+
+        public void AddUnit(IUnit unit, Vector2 position)
+        {
+            UndoUtility.RecordEditedObject("Create Node");
+            unit.guid = Guid.NewGuid();
+            unit.position = position.PixelPerfect();
+            graph.units.Add(unit);
+            selection.Select(unit);
+            GUI.changed = true;
+        }
+
+        private UnitOptionTree GetNewUnitOptions(UnitOptionFilter filter)
+        {
+            var options = new UnitOptionTree(new GUIContent("Node"));
+
+            options.filter = filter;
+            options.reference = reference;
+
+            if (filter.CompatibleOutputType == typeof(object))
+            {
+                options.surfaceCommonTypeLiterals = true;
+            }
+
+            return options;
+        }
+
+        private void NewSticky(Vector2 position)
+        {
+            UndoUtility.RecordEditedObject("Create Sticky Note");
+            var stickyNote = new StickyNote() { position = new Rect(position, new Vector2(100, 100)) };
+            graph.elements.Add(stickyNote);
+            selection.Select(stickyNote);
+            GUI.changed = true;
+        }
+
+        private void NewUnit(Vector2 position)
+        {
+            var filter = UnitOptionFilter.Any;
+            filter.GraphHashCode = graph.GetHashCode();
+            NewUnit(position, GetNewUnitOptions(filter));
+        }
+
+        private void NewUnit(Vector2 unitPosition, UnitOptionTree options, Action<IUnit> then = null)
+        {
+            delayCall += () =>
+            {
+                var activatorPosition = new Rect(e.mousePosition, new Vector2(200, 1));
+
+                var context = this.context;
+
+                LudiqGUI.FuzzyDropdown
+                    (
+                        activatorPosition,
+                        options,
+                        null,
+                        delegate (object _option)
+                        {
+                            context.BeginEdit();
+                            if (_option is IUnitOption)
+                            {
+                                var option = (IUnitOption)_option;
+                                var unit = option.InstantiateUnit();
+                                AddUnit(unit, unitPosition);
+                                option.PreconfigureUnit(unit);
+                                then?.Invoke(unit);
+                                GUI.changed = true;
+                            }
+                            else
+                            {
+                                if ((Type)_option == typeof(StickyNote))
+                                {
+                                    NewSticky(unitPosition);
+                                }
+                            }
+
+                            context.EndEdit();
+                        }
+                    );
+            };
+        }
+
+        #endregion
+
+
+        #region Drag & Drop
+
+        private bool CanDetermineDraggedInput(UnityObject uo)
+        {
+            if (uo.IsSceneBound())
+            {
+                if (reference.self == uo.GameObject())
+                {
+                    // Because we'll be able to assign it to Self
+                    return true;
+                }
+
+                if (reference.serializedObject.IsSceneBound())
+                {
+                    // Because we'll be able to use a direct scene reference
+                    return true;
+                }
+
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+
+        public override bool AcceptsDragAndDrop()
+        {
+            if (DragAndDropUtility.Is<ScriptGraphAsset>())
+            {
+                return FlowDragAndDropUtility.AcceptsScript(graph);
+            }
+
+            return DragAndDropUtility.Is<UnityObject>() && !DragAndDropUtility.Is<IMacro>() && CanDetermineDraggedInput(DragAndDropUtility.Get<UnityObject>())
+                || EditorVariablesUtility.isDraggingVariable;
+        }
+
+        public override void PerformDragAndDrop()
+        {
+            if (DragAndDropUtility.Is<ScriptGraphAsset>())
+            {
+                var flowMacro = DragAndDropUtility.Get<ScriptGraphAsset>();
+                var superUnit = new SubgraphUnit(flowMacro);
+                AddUnit(superUnit, DragAndDropUtility.position);
+            }
+            else if (DragAndDropUtility.Is<UnityObject>())
+            {
+                var uo = DragAndDropUtility.Get<UnityObject>();
+                var type = uo.GetType();
+                var filter = UnitOptionFilter.Any;
+                filter.Literals = false;
+                filter.Expose = false;
+                var options = GetNewUnitOptions(filter);
+
+                var root = new List<object>();
+
+                if (!uo.IsSceneBound() || reference.serializedObject.IsSceneBound())
+                {
+                    if (uo == reference.self)
+                    {
+                        root.Add(new UnitOption<This>(new This()));
+                    }
+
+                    root.Add(new LiteralOption(new Literal(type, uo)));
+                }
+
+                if (uo is MonoScript script)
+                {
+                    var scriptType = script.GetClass();
+
+                    if (scriptType != null)
+                    {
+                        root.Add(scriptType);
+                    }
+                }
+                else
+                {
+                    root.Add(type);
+                }
+
+                if (uo is GameObject)
+                {
+                    root.AddRange(uo.GetComponents<Component>().Select(c => c.GetType()));
+                }
+
+                options.rootOverride = root.ToArray();
+
+                NewUnit(DragAndDropUtility.position, options, (unit) =>
+                {
+                    // Try to assign a correct input
+                    var compatibleInput = unit.CompatibleValueInput(type);
+
+                    if (compatibleInput == null)
+                    {
+                        return;
+                    }
+
+                    if (uo.IsSceneBound())
+                    {
+                        if (reference.self == uo.GameObject())
+                        {
+                            // The component is owned by the same game object as the graph.
+
+                            if (compatibleInput.nullMeansSelf)
+                            {
+                                compatibleInput.SetDefaultValue(null);
+                            }
+                            else
+                            {
+                                var self = new This();
+                                self.position = unit.position + new Vector2(-150, 19);
+                                graph.units.Add(self);
+                                self.self.ConnectToValid(compatibleInput);
+                            }
+                        }
+                        else if (reference.serializedObject.IsSceneBound())
+                        {
+                            // The component is from another object from the same scene
+                            compatibleInput.SetDefaultValue(uo.ConvertTo(compatibleInput.type));
+                        }
+                        else
+                        {
+                            throw new NotSupportedException("Cannot determine compatible input from dragged Unity object.");
+                        }
+                    }
+                    else
+                    {
+                        compatibleInput.SetDefaultValue(uo.ConvertTo(compatibleInput.type));
+                    }
+                });
+            }
+            else if (EditorVariablesUtility.isDraggingVariable)
+            {
+                var kind = EditorVariablesUtility.kind;
+                var declaration = EditorVariablesUtility.declaration;
+
+                UnifiedVariableUnit unit;
+
+                if (e.alt)
+                {
+                    unit = new SetVariable();
+                }
+                else if (e.shift)
+                {
+                    unit = new IsVariableDefined();
+                }
+                else
+                {
+                    unit = new GetVariable();
+                }
+
+                unit.kind = kind;
+                AddUnit(unit, DragAndDropUtility.position);
+                unit.name.SetDefaultValue(declaration.name);
+            }
+        }
+
+        public override void DrawDragAndDropPreview()
+        {
+            if (DragAndDropUtility.Is<ScriptGraphAsset>())
+            {
+                GraphGUI.DrawDragAndDropPreviewLabel(DragAndDropUtility.offsetedPosition, DragAndDropUtility.Get<ScriptGraphAsset>().name, typeof(ScriptGraphAsset).Icon());
+            }
+            else if (DragAndDropUtility.Is<GameObject>())
+            {
+                var gameObject = DragAndDropUtility.Get<GameObject>();
+                GraphGUI.DrawDragAndDropPreviewLabel(DragAndDropUtility.offsetedPosition, gameObject.name + "...", gameObject.Icon());
+            }
+            else if (DragAndDropUtility.Is<UnityObject>())
+            {
+                var obj = DragAndDropUtility.Get<UnityObject>();
+                var type = obj.GetType();
+                GraphGUI.DrawDragAndDropPreviewLabel(DragAndDropUtility.offsetedPosition, type.HumanName() + "...", type.Icon());
+            }
+            else if (EditorVariablesUtility.isDraggingVariable)
+            {
+                var kind = EditorVariablesUtility.kind;
+                var name = EditorVariablesUtility.declaration.name;
+
+                string label;
+
+                if (e.alt)
+                {
+                    label = $"Set {name}";
+                }
+                else if (e.shift)
+                {
+                    label = $"Check if {name} is defined";
+                }
+                else
+                {
+                    label = $"Get {name}";
+                }
+
+                GraphGUI.DrawDragAndDropPreviewLabel(DragAndDropUtility.offsetedPosition, label, BoltCore.Icons.VariableKind(kind));
+            }
+        }
+
+        #endregion
+
+
+        #region Drawing
+
+        public bool showRelations { get; set; }
+
+        #endregion
+
+
+        #region Connection Creation
+
+        public IUnitPort connectionSource { get; set; }
+
+        public Vector2 connectionEnd { get; set; }
+
+        public bool isCreatingConnection => connectionSource != null &&
+        connectionSource.unit != null;                                     // Make sure the port didn't get destroyed: https://support.ludiq.io/communities/5/topics/4034-x
+
+        public void CancelConnection()
+        {
+            connectionSource = null;
+        }
+
+        #endregion
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          using System;
+using System.Text.RegularExpressions;
+
+namespace Unity.VisualScripting.Analytics
+{
+    internal static class AnalyticsUtilities
+    {
+        internal static string AnonymizeException(Exception e)
+        {
+            const string pathSectionOutsidePackage = "in (?<P>.*)Packages\\\\com.unity.visualscripting";
+            // Placing a '^' character to distinguish these lines from file paths outside our package
+            const string pathSectionOutsidePackageReplacement = "in ^Packages\\com.unity.visualscripting";
+
+            var anonymizedString = Regex.Replace(e.ToString(), pathSectionOutsidePackage, pathSectionOutsidePackageReplacement);
+
+            // Detecting any callstack line that doesn't match our previously anonymized package paths
+            const string filePathsOutsidePackage = ". at.*in (?<P>[^^]*:[0-9]*)";
+            const string filePathsOutsidePackageReplacement = "  at <method> in <file>";
+
+            anonymizedString = Regex.Replace(anonymizedString, filePathsOutsidePackage,
+                filePathsOutsidePackageReplacement);
+
+            return anonymizedString;
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              using UnityEditor;
+
+namespace Unity.VisualScripting
+{
+    public sealed class UsageAnalytics
+    {
+        const int k_MaxEventsPerHour = 1000;
+        const int k_MaxNumberOfElements = 1000;
+        const string k_VendorKey = "unity.bolt";
+        const string k_EventName = "BoltUsage";
+        static bool isRegistered = false;
+
+        public static void CollectAndSend()
+        {
+            if (!EditorAnalytics.enabled)
+                return;
+
+            if (!RegisterEvent())
+                return;
+
+            var data = CollectData();
+
+            EditorAnalytics.SendEventWithLimit(k_EventName, data);
+        }
+
+        private static bool RegisterEvent()
+        {
+            if (!isRegistered)
+            {
+                var result = EditorAnalytics.RegisterEventWithLimit(k_EventName, k_MaxEventsPerHour, k_MaxNumberOfElements, k_VendorKey);
+                if (result == UnityEngine.Analytics.AnalyticsResult.Ok)
+                {
+                    isRegistered = true;
+                }
+            }
+
+            return isRegistered;
+        }
+
+        private static UsageAnalyticsData CollectData()
+        {
+            var data = new UsageAnalyticsData
+            {
+                productVersion = BoltProduct.instance.version.ToString(),
+            };
+
+            return data;
+        }
+
+        private struct UsageAnalyticsData
+        {
+            public string productVersion;
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  using System;
+using System.Collections.Generic;
+using UnityEditor;
+using UnityEngine;
+
+namespace Unity.VisualScripting.Analytics
+{
+    internal static class MigrationAnalytics
+    {
+        private const int MaxEventsPerHour = 120;
+        private const int MaxNumberOfElements = 1000;
+        private const string VendorKey = "unity.visualscripting";
+        private const string EventName = "VScriptMigration";
+        private static bool _isRegistered = false;
+
+        internal static void Send(Data data)
+        {
+            if (!EditorAnalytics.enabled)
+                return;
+
+            if (!RegisterEvent())
+                return;
+
+            EditorAnalytics.SendEventWithLimit(EventName, data);
+        }
+
+        private static bool RegisterEvent()
+        {
+            if (!_isRegistered)
+            {
+                var result = EditorAnalytics.RegisterEventWithLimit(EventName, MaxEventsPerHour, MaxNumberOfElements, VendorKey);
+                if (result == UnityEngine.Analytics.AnalyticsResult.Ok)
+                {
+                    _isRegistered = true;
+                }
+            }
+
+            return _isRegistered;
+        }
+
+        [Serializable]
+        internal class Data
+        {
+            [SerializeField]
+            internal MigrationStepAnalyticsData total;
+            [SerializeField]
+            internal List<MigrationStepAnalyticsData> steps;
+        }
+
+        [Serializable]
+        internal class MigrationStepAnalyticsData
+        {
+            [SerializeField]
+            internal string pluginId;
+            [SerializeField]
+            internal string from;
+            [SerializeField]
+            internal string to;
+            [SerializeField]
+            internal bool success;
+            [SerializeField]
+            internal string exception;
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        {
+    "name": "Unity.VisualScripting.Flow.Editor",
+    "references": [
+        "Unity.VisualScripting.Core",
+        "Unity.VisualScripting.Core.Editor",
+        "Unity.VisualScripting.Flow",
+        "Unity.InputSystem"
+    ],
+    "optionalUnityReferences": [],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "versionDefines": [
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "1.0.1",
+            "define": "PACKAGE_INPUT_SYSTEM_EXISTS"
+        },
+        {
+            "name": "com.unity.inputsystem",
+            "expression": "1.2.0",
+            "define": "PACKAGE_INPUT_SYSTEM_1_2_0_OR_NEWER_EXISTS"
+        }
+    ]
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              INDX( 	 **          (   H  Ë      
+     ŸŸi Ÿ          ÷}    x f     Õì    õÕ?ÁÏŸê˜Ê˘ùØŸEÎbÁÏŸKÀ$ËÏŸ       ›               F l o w G r a p h E d i t o r . c s . ﬁì    Ä p     Õì    [ÄW¿ÏŸ PõÓÇ§ŸÌÛúÜ¿‰ŸÑ<ÄW¿ÏŸ¯       Û                F l o w G r a p h E d i t o r . c s . m e t a Ÿ}    à r     Õì    àı?ÁÏŸê˜Ê˘ùØŸ±gÁÏŸÁ¨À$ËÏŸ       4               F l o w G r a p h U n i t U I S a m p l e . c s . m e ‡ì    ê |     Õì    uÿÄW¿ÏŸ PõÓÇ§ŸÁ≈öÜ¿‰ŸuÿÄW¿ÏŸ¯     
+ Û                F l o w G r a p h U n i t U I S a m p l e . c s . m e t a     €}    Ä j     Õì    Ñ@ÁÏŸ WË˘ùØŸô&hÁÏŸÁ¨À$ËÏŸ–       –                F l o w M a c h i n e E d i t o r . c s . m e ‚ì    à t     Õì    CîÅW¿ÏŸ PõÓÇ§ŸOıòÜ¿‰ŸHªÅW¿ÏŸ¯       Û                F l o w M a c h i n e E d i t o r . c s . m e t a     %î    h T     Õì    PëúW¿ÏŸH`ÁÏŸH`ÁÏŸΩù]ÈÏŸ                       	 F r a m e w o r k . m „ì    p ^     Õì    ËÇW¿ÏŸ PõÓÇ§Ÿ\5ÒÖ¿‰ŸËÇW¿ÏŸ∞     
+ ¨                F r a m e w o r k . m e t a   ¥î    h X     Õì    ÆØ“W¿ÏŸ¸;`ÁÏŸ¸;`ÁÏŸ?J‘$ËÏŸ                        I n v o c a t i o n s ‰ì    x b     Õì    ”_ÇW¿ÏŸ PõÓÇ§ŸÉŸÍÖ¿‰Ÿ”_ÇW¿ÏŸ∞       ¨                I n v o c a t i o n s . m e t a       πî    ` P     Õì    äç‘W¿ÏŸ„˜`ÁÏŸ„˜`ÁÏŸΩù]ÈÏŸ                        O p t i o n s Âì    p Z     Õì    m∂ÇW¿ÏŸ PõÓÇ§Ÿ@™—Ö¿‰Ÿ‚ÇW¿ÏŸ∞       ¨                O p t i o n s . m e t a       Ãî    ` N     Õì    ¥€W¿Ï
+ CÁaÁÏŸCÁaÁÏŸΩù]ÈÏŸ                        P l u g i n . Êì    h X     Õì    a1ÉW¿ÏŸ PõÓÇ§Ÿƒ‘sÖ¿‰Ÿa1ÉW¿ÏŸ∞       ¨                P l u g i n . m e t a ï    ` L     Õì    N8¸W¿ÏŸº9dÁÏŸº9dÁÏŸ!îù]ÈÏŸ                        P o r t s . m Áì    h V     Õì    &¶ÉW¿ÏŸ PõÓÇ§ŸÖ'TÖ¿‰Ÿ&¶ÉW¿ÏŸ∞       ¨               
+ P o r t s . m e t a   :ï    h V     Õì    ªX¿ÏŸ:^aÁÏŸ:^aÁÏŸ?J‘$ËÏŸ                       
+ P r o p e r t i e s . Ëì    p `     Õì    ‚ÚÉW¿ÏŸ PõÓÇ§
+ ‚PÖ¿‰ŸÚÑW¿ÏŸ∞       ¨                P r o p e r t i e s . m e t a ‹}    x h     Õì    i´@ÁÏŸ¿›È˘ùØŸä≈iÁÏŸÙ5Ã$ËÏŸ       ”               R u n t i m e G r a p h B a s e . c s Íì    à r     Õì    ¶°ÑW¿ÏŸ PõÓÇ§Ÿ]ÆLÖ¿‰Ÿ˝ÀÑW¿ÏŸX       V                R u n t i m e G r a p h B a s e . c s . m e t a       =ï    ` L     Õì    ıÅ	X¿ÏŸÜ∆dÁÏŸÜ∆dÁÏŸ5”ú]ÈÏŸ                        U n i t s . m Îì    h V     Õì    Ä-ÖW¿ÏŸ PõÓÇ§ŸR◊>Ö¿‰ŸÄ-ÖW¿ÏŸ∞       ¨               
+ U n 
+ t s . m e t a   Ïì    ® í     Õì    áoÖW¿ÏŸ PõÓÇ§Ÿ>›=Ö¿‰ŸèñÖW¿ÏŸ       “              ( U n i t y . V i s u a l S c r i p t i n g . F l o w . E d i t o r . a s m d e f       Ìì    ∞ ú     Õì    w‰ÖW¿ÏŸ PõÓÇ§Ÿƒ€<Ö¿‰Ÿw‰ÖW¿ÏŸ®       ¶               - U n i t y . V i s u a l S c r i p t i n g . F l o w . E d i t o r . a s m d e f . m e t a     ﬁ}    p \     Õì    i´@ÁÏŸ¿›È˘ùØŸä≈iÁÏŸÙ5Ã$ËÏŸ       ê               X F l o w G r a p h . c s . m Ôì    x f     Õì    BóÜW¿ÏŸ PõÓÇ§
+ ol:Ö¿‰ŸuæÜW¿ÏŸ¯       Û                X F l o w G r a p h . c s . m e t a                                                                                                                                                                                                                                                                                                                                                                                                                                               
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+ Ôªøusing System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+
+using UnityEditor;
+using UnityEngine;
+
+namespace Unity.PlasticSCM.Editor.UI
+{
+    internal static class FindEditorWindow
+    {
+        internal static EditorWindow ProjectWindow()
+        {
+            Type projectBrowserType = typeof(EditorWindow).Assembly.GetType(
+                    "UnityEditor.ProjectBrowser");
+
+            UnityEngine.Object[] windows = Resources.FindObjectsOfTypeAll(
+                 projectBrowserType);
+
+            if (windows.Length == 0)
+                return null;
+
+            return windows[0] as EditorWindow;
+        }
+
+        internal static EditorWindow ToDock<T>()
+        {
+            List<EditorWindow> windows = GetAvailableWindows();
+
+            IEnumerable<EditorWindow> candidateWindows = windows
+                .Where(w => !(w is T))
+                .Where(w => w.position.width > 400 && w.position.height > 300)
+                .OrderByDescending(w => w.position.width * w.position.height);
+
+            return candidateWindows.FirstOrDefault();
+        }
+
+        static List<EditorWindow> GetAvailableWindows()
+        {
+            List<EditorWindow> result = new List<EditorWindow>();
+
+            var hostViewField = typeof(EditorWindow).GetField(
+                "m_Parent", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            if (hostViewField == null)
+                return null;
+
+            var hostViewType = hostViewField.FieldType;
+            var actualViewField = hostViewType.GetField(
+                "m_ActualView", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            if (actualViewField == null)
+                return null;
+
+            foreach (var window in Resources.FindObjectsOfTypeAll<EditorWindow>())
+            {
+                var hostView = hostViewField.GetValue(window);
+
+                if (hostView == null)
+                    continue;
+
+                EditorWindow actualDrawnWindow = actualViewField
+                    .GetValue(hostView) as EditorWindow;
+
+                if (actualDrawnWindow == null)
+                    continue;
+
+                if (result.Contains(actualDrawnWindow))
+                    continue;
+
+                result.Add(actualDrawnWindow);
+            }
+
+            return result;
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            Ôªøusing System;
+using System.Threading;
+
+using Codice.LogWrapper;
+
+namespace Unity.PlasticSCM.Editor.UI
+{
+    internal static class GUIActionRunner
+    {
+        internal delegate void ActionDelegate();
+
+        internal static void RunGUIAction(ActionDelegate action)
+        {
+            if (EditorDispatcher.IsOnMainThread)
+            {
+                action();
+                return;
+            }
+
+            lock (mLock)
+            {
+                ManualResetEvent syncEvent = new ManualResetEvent(false);
+
+                EditorDispatcher.Dispatch(delegate {
+                    try
+                    {
+                        action();
+                    }
+                    catch (Exception e)
+                    {
+                        mLog.ErrorFormat("GUI action failed: {0}", e.Message);
+                        mLog.DebugFormat("Stack trace:{0}{1}", Environment.NewLine, e.StackTrace);
+                        throw;
+                    }
+                    finally
+                    {
+                        syncEvent.Set();
+                    }
+                });
+
+                syncEvent.WaitOne();
+            }
+        }
+
+        static object mLock = new object();
+
+        static readonly ILog mLog = LogManager.GetLogger("GUIActionRunner");
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                INDX( 	 Ù∂:           (   ∏  Ë       Ÿe l                 î{    à v     ˆì    eá[ÁÏŸP=Î˘ùØŸn]ÁÏŸ3rÀ$ËÏŸ       b               C o n t r o l C o n n e c t i o n W i d g e t . c s . ¯ì    ê Ä     ˆì    ∏˚âW¿ÏŸ PõÓÇ§Ÿ¸®‡Ü¿‰Ÿ∏˚âW¿ÏŸ¯       Û                C o n t r o l C o n n e c t i o n W i d g e t . c s . m e t a ô{    à v     ˆì    e˝\ÁÏŸP=Î˘ùØŸ+Ü]ÁÏŸÜÀ$ËÏŸ®      £               I n v a l i d C o n n e c t i o n W i d g e t . c s . ˙ì    ê Ä     ˆì     æäW¿Ï  PõÓÇ§Ÿ±Æ‹Ü¿‰Ÿ æäW¿ÏŸ¯       Û                I n v a l i d C o n n e c t i o n W i d g e t . c s . m e t a ó{    à r     ˆì    âÑ\ÁÏŸP=Î˘ùØŸn]ÁÏŸDôÀ$ËÏŸ®       ¢                I U n i t C o n n e c t i o n W i d g e t . c s . m e ¸ì    ê |     ˆì    EäãW¿ÏŸ PõÓÇ§Ÿ ©ﬁÜ¿‰ŸEäãW¿ÏŸ¯       Û                I U n i t C o n n e c t i o n W i d g e t . c s . m e t a     ò{    Ä p     ˆì    âÑ\ÁÏŸP=Î˘ùØŸ+Ü]ÁÏŸDôÀ$ËÏŸ(      $               U n i t C o n n e c t i o n S t y l  s . c s ˛ì    ê z     ˆì    §GåW¿ÏŸ PõÓÇ§ŸÒï⁄Ü¿‰Ÿ&uåW¿ÏŸ¯       Û                U n i t C o n n e c t i o n S t y l e s . c s . m e t a       ˇì    Ä p     ˆì    4ÆåW¿ÏŸ PõÓÇ§ŸÌmŸÜ¿‰Ÿ√’åW¿ÏŸ        l               U n i t C o n n e c t i o n W i d g e t . c s  î    ê z     ˆì    √éW¿ÏŸ PõÓÇ§Ÿ#ô◊Ü¿‰Ÿ√éW¿ÏŸ¯       Û                U n i t C o n n e c t i o n W i d g e t . c s . m e t a       î    à r     ˆì    Ñ]éW¿ÏŸ PõÓÇ§ŸtØ÷Ü¿‰ŸàÑéW¿ÏŸ        v               V a  u e C o n n e c t i o n W i d g e t . c s       î    ê |     ˆì    {ªéW¿ÏŸ PõÓÇ§Ÿf’Ü¿‰Ÿ1„éW¿ÏŸ¯       Û                V a l u e C o n n e c t i o n W i d g e t . c s . m e t a                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              using System.Collections.Generic;
+using UnityEditor;
+using UnityEngine;
+
+namespace Unity.VisualScripting
+{
+    public abstract class UnitConnectionWidget<TConnection> : GraphElementWidget<FlowCanvas, TConnection>, IUnitConnectionWidget
+        where TConnection : class, IUnitConnection
+    {
+        protected UnitConnectionWidget(FlowCanvas canvas, TConnection connection) : base(canvas, connection) { }
+
+
+        #region Model
+
+        protected TConnection connection => element;
+
+        protected IUnitConnectionDebugData ConnectionDebugData => GetDebugData<IUnitConnectionDebugData>();
+
+        #endregion
+
+
+        #region Lifecycle
+
+        public override void BeforeFrame()
+        {
+            base.BeforeFrame();
+
+            if (showDroplets)
+            {
+                GraphGUI.UpdateDroplets(canvas, droplets, ConnectionDebugData.lastInvokeFrame, ref lastInvokeTime, ref dropTime);
+            }
+        }
+
+        #endregion
+
+
+        #region Positioning
+
+        public override IEnumerable<IWidget> positionDependencies
+        {
+            get
+            {
+                yield return canvas.Widget(connection.source);
+                yield return canvas.Widget(connection.destination);
+            }
+        }
+
+        protected override bool snapToGrid => false;
+
+        public Rect sourceHandlePosition { get; private set; }
+
+        public Rect destinationHandlePosition { get; private set; }
+
+        public Vector2 sourceHandleEdgeCenter { get; private set; }
+
+        public Vector2 destinationHandleEdgeCenter { get; private set; }
+
+        public Vector2 middlePosition;
+
+        private Rect _position;
+
+        private Rect _clippingPosition;
+
+        public override Rect position
+        {
+            get { return _position; }
+            set { }
+        }
+
+        public override Rect clippingPosition => _clippingPosition;
+
+        public override void CachePosition()
+        {
+            base.CachePosition();
+
+            sourceHandlePosition = canvas.Widget<IUnitPortWidget>(connection.source).handlePosition;
+            destinationHandlePosition = canvas.Widget<IUnitPortWidget>(connection.destination).handlePosition;
+
+            sourceHandleEdgeCenter = sourceHandlePosition.GetEdgeCenter(Edge.Right);
+            destinationHandleEdgeCenter = destinationHandlePosition.GetEdgeCenter(Edge.Left);
+
+            middlePosition = (sourceHandlePosition.center + destinationHandlePosition.center) / 2;
+
+            _position = new Rect
+                (
+                middlePosition.x,
+                middlePosition.y,
+                0,
+                0
+                );
+
+            _clippingPosition = _position.Encompass(sourceHandleEdgeCenter).Encompass(destinationHandleEdgeCenter);
+        }
+
+        #endregion
+
+
+        #region Drawing
+
+        protected virtual bool colorIfActive => true;
+
+        public abstract Color color { get; }
+
+        protected override bool dim
+        {
+            get
+            {
+                var dim = BoltCore.Configuration.dimInactiveNodes && !connection.destination.unit.Analysis<UnitAnalysis>(context).isEntered;
+
+                if (BoltCore.Configuration.dimIncompatibleNodes && canvas.isCreatingConnection)
+                {
+                    dim = true;
+                }
+
+                return dim;
+            }
+        }
+
+        public override void DrawBackground()
+        {
+            base.DrawBackground();
+
+            BeginDim();
+
+            DrawConnection();
+
+            if (showDroplets)
+            {
+                DrawDroplets();
+            }
+
+            EndDim();
+        }
+
+        protected virtual void DrawConnection()
+        {
+            var color = this.color;
+
+            var sourceWidget = canvas.Widget<IUnitPortWidget>(connection.source);
+            var destinationWidget = canvas.Widget<IUnitPortWidget>(connection.destination);
+
+            var highlight = !canvas.isCreatingConnection && (sourceWidget.isMouseOver || destinationWidget.isMouseOver);
+
+            var willDisconnect = sourceWidget.willDisconnect || destinationWidget.willDisconnect;
+
+            if (willDisconnect)
+            {
+                color = UnitConnectionStyles.disconnectColor;
+            }
+            else if (highlight)
+            {
+                color = UnitConnectionStyles.highlightColor;
+            }
+            else if (colorIfActive)
+            {
+                if (EditorApplication.isPaused)
+                {
+                    if (EditorTimeBinding.frame == ConnectionDebugData.lastInvokeFrame)
+                    {
+                        color = UnitConnectionStyles.activeColor;
+                    }
+                }
+                else
+                {
+                    color = Color.Lerp(UnitConnectionStyles.activeColor, color, (EditorTimeBinding.time - ConnectionDebugData.lastInvokeTime) / UnitWidget<IUnit>.Styles.invokeFadeDuration);
+                }
+            }
+
+            var thickness = 3;
+
+            GraphGUI.DrawConnection(color, sourceHandleEdgeCenter, destinationHandleEdgeCenter, Edge.Right, Edge.Left, null, Vector2.zero, UnitConnectionStyles.relativeBend, UnitConnectionStyles.minBend, thickness);
+        }
+
+        #endregion
+
+
+        #region Selecting
+
+        public override bool canSelect => false;
+
+        #endregion
+
+
+        #region Dragging
+
+        public override bool canDrag => false;
+
+        #endregion
+
+
+        #region Deleting
+
+        public override bool canDelete => true;
+
+        #endregion
+
+
+        #region Droplets
+
+        private readonly List<float> droplets = new List<float>();
+
+        private float dropTime;
+
+        private float lastInvokeTime;
+
+        private const float handleAlignmentMargin = 0.1f;
+
+        protected virtual bool showDroplets => true;
+
+        protected abstract Vector2 GetDropletSize();
+
+        protected abstract void DrawDroplet(Rect position);
+
+        protected virtual void DrawDroplets()
+        {
+            foreach (var droplet in droplets)
+            {
+                Vector2 position;
+
+                if (droplet < handleAlignmentMargin)
+                {
+                    var t = droplet / handleAlignmentMargin;
+                    position = Vector2.Lerp(sourceHandlePosition.center, sourceHandleEdgeCenter, t);
+                }
+                else if (droplet > 1 - handleAlignmentMargin)
+                {
+                    var t = (droplet - (1 - handleAlignmentMargin)) / handleAlignmentMargin;
+                    position = Vector2.Lerp(destinationHandleEdgeCenter, destinationHandlePosition.center, t);
+                }
+                else
+                {
+                    var t = (droplet - handleAlignmentMargin) / (1 - 2 * handleAlignmentMargin);
+                    position = GraphGUI.GetPointOnConnection(t, sourceHandleEdgeCenter, destinationHandleEdgeCenter, Edge.Right, Edge.Left, UnitConnectionStyles.relativeBend, UnitConnectionStyles.minBend);
+                }
+
+                var size = GetDropletSize();
+
+                using (LudiqGUI.color.Override(GUI.color * color))
+                {
+                    DrawDroplet(new Rect(position.x - size.x / 2, position.y - size.y / 2, size.x, size.y));
+                }
+            }
+        }
+
+        #endregion
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    using System;
+using UnityEditor;
+using UnityEngine;
+
+namespace Unity.VisualScripting
+{
+    [Widget(typeof(ValueConnection))]
+    public sealed class ValueConnectionWidget : UnitConnectionWidget<ValueConnection>
+    {
+        public ValueConnectionWidget(FlowCanvas canvas, ValueConnection connection) : base(canvas, connection) { }
+
+        private new ValueConnection.DebugData ConnectionDebugData => GetDebugData<ValueConnection.DebugData>();
+
+
+        #region Drawing
+
+        public override Color color => DetermineColor(connection.source.type, connection.destination.type);
+
+        protected override bool colorIfActive => !BoltFlow.Configuration.animateControlConnections || !BoltFlow.Configuration.animateValueConnections;
+
+        public override void DrawForeground()
+        {
+            base.DrawForeground();
+
+            if (BoltFlow.Configuration.showConnectionValues)
+            {
+                var showLastValue = EditorApplication.isPlaying && ConnectionDebugData.assignedLastValue;
+                var showPredictedvalue = BoltFlow.Configuration.predictConnectionValues && !EditorApplication.isPlaying && Flow.CanPredict(connection.source, reference);
+
+                if (showLastValue || showPredictedvalue)
+                {
+                    var previousIconSize = EditorGUIUtility.GetIconSize();
+                    EditorGUIUtility.SetIconSize(new Vector2(IconSize.Small, IconSize.Small));
+
+                    object value;
+
+                    if (showLastValue)
+                    {
+                        value = ConnectionDebugData.lastValue;
+                    }
+                    else // if (showPredictedvalue)
+                    {
+                        value = Flow.Predict(connection.source, reference);
+                    }
+
+                    var label = new GUIContent(value.ToShortString(), Icons.Type(value?.GetType())?[IconSize.Small]);
+                    var labelSize = Styles.prediction.CalcSize(label);
+                    var labelPosition = new Rect(position.position - labelSize / 2, labelSize);
+
+                    BeginDim();
+
+                    GUI.Label(labelPosition, label, Styles.prediction);
+
+                    EndDim();
+
+                    EditorGUIUtility.SetIconSize(previousIconSize);
+                }
+            }
+        }
+
+        public static Color DetermineColor(Type source, Type destination)
+        {
+            if (destination == typeof(object))
+            {
+                return DetermineColor(source);
+            }
+
+            return DetermineColor(destination);
+        }
+
+        public static Color DetermineColor(Type type)
+        {
+            if (type == null)
+            {
+                return new Color(0.8f, 0.8f, 0.8f);
+            }
+
+            if (type == typeof(string))
+            {
+                return new Color(1.0f, 0.62f, 0.35f);
+            }
+
+            if (type == typeof(bool))
+            {
+                return new Color(0.86f, 0.55f, 0.92f);
+            }
+
+            if (type == typeof(char))
+            {
+                return new Color(1.0f, 0.90f, 0.40f);
+            }
+
+            if (type.IsEnum)
+            {
+                return new Color(1.0f, 0.63f, 0.66f);
+            }
+
+            if (type.IsNumeric())
+            {
+                return new Color(0.45f, 0.78f, 1f);
+            }
+
+            if (type.IsNumericConstruct())
+            {
+                return new Color(0.45f, 1.00f, 0.82f);
+            }
+
+            return new Color(0.60f, 0.88f, 0.00f);
+        }
+
+        #endregion
+
+
+        #region Droplets
+
+        protected override bool showDroplets => BoltFlow.Configuration.animateValueConnections;
+
+        protected override Vector2 GetDropletSize()
+        {
+            return BoltFlow.Icons.valuePortConnected?[12].Size() ?? 12 * Vector3.one;
+        }
+
+        protected override void DrawDroplet(Rect position)
+        {
+            if (BoltFlow.Icons.valuePortConnected != null)
+            {
+                GUI.DrawTexture(position, BoltFlow.Icons.valuePortConnected?[12]);
+            }
+        }
+
+        #endregion
+
+
+        private static class Styles
+        {
+            static Styles()
+            {
+                prediction = new GUIStyle(EditorStyles.label);
+                prediction.normal.textColor = Color.white;
+                prediction.fontSize = 9;
+                prediction.normal.background = new Color(0, 0, 0, 0.25f).GetPixel();
+                prediction.padding = new RectOffset(4, 6, 3, 3);
+                prediction.margin = new RectOffset(0, 0, 0, 0);
+                prediction.alignment = TextAnchor.MiddleCenter;
+            }
+
+            public static readonly GUIStyle prediction;
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          INDX( 	 ™œ:           (   8
+  Ë       ŸŸ                  õ{    Ä n     î    ;]ÁÏŸ0`Ì˘ùØŸãbÁÏŸ3rÀ$ËÏŸ¯       ˜                F l o w G r a p h D e s c r i p t o r . c s . î    à x     î    ˛‰èW¿ÏŸ PõÓÇ§Ÿ`–Ü¿‰Ÿ˘êW¿ÏŸ¯       Û                F l o w G r a p h D e s c r i p t o r . c s . m e t a ñ{    à r     î    @\ÁÏŸ0`Ì˘ùØŸn]ÁÏŸKÀ$ËÏŸ                     F l o w M a c h i n e D e s c r i p t o r . c s . m e î    ê |     î    ˇªêW¿ÏŸ PõÓÇ§ŸaÕÜ¿‰ ˇªêW¿ÏŸ¯       Û                F l o w M a c h i n e D e s c r i p t o r . c s . m e t a     ö{    Ä n     î    e˝\ÁÏŸ0`Ì˘ùØŸ=u^ÁÏŸÁ¨À$ËÏŸ                     F l o w M a c r o D e s c r i p t o r . c s . 	î    à x     î    íëW¿ÏŸ PõÓÇ§ŸÂÀ Ü¿‰ŸíëW¿ÏŸ¯       Û                F l o w M a c r o D e s c r i p t o r . c s . m e t a ú{    x f     î    ñg]ÁÏŸÄ#Ó˘ùØŸãbÁÏŸDôÀ$ËÏŸ®      ß               I U n i t D e s c r i p t o r . c s . î    Ä p     î    >díW¿Ï  PõÓÇ§ŸcË»Ü¿‰Ÿ>díW¿ÏŸ¯       Û                I U n i t D e s c r i p t o r . c s . m e t a î    p `     î    'µíW¿ÏŸ PõÓÇ§Ÿ›ÿ«Ü¿‰Ÿ¨‹íW¿ÏŸ @      √1               U n i t A n a l y s e r . c s î    Ä j     î    *ìW¿ÏŸ PõÓÇ§Ÿ7,∆Ü¿‰Ÿ*ìW¿ÏŸ¯       Û                U n i t A n a l y s e r . c s . m e t a       ù{    p `     î    Úÿ]ÁÏŸ–ÊÓ˘ùØŸãbÁÏŸ3rÀ$ËÏŸò       ò                U n i t A n a l y s i s . c s î    Ä j     î    ±ËìW¿ÏŸ PõÓÇ§Ÿm+ƒÜ¿‰Ÿ∏îW¿ÏŸ¯      Û                U n i t A n a l y s i s . c s . m e t a       û{    x f     î    Úÿ]ÁÏŸ–ÊÓ˘ùØŸãbÁÏŸKÀ$ËÏŸ0      .               U n i t D e s c r i p t i o n . c s . î    Ä p     î    ”ÕîW¿ÏŸ PõÓÇ§ŸS¸¡Ü¿‰Ÿ”ÕîW¿ÏŸ¯       Û                U n i t D e s c r i p t i o n . c s . m e t a î    x d     î    ¥ïW¿ÏŸ PõÓÇ§Ÿõ¡Ü¿‰Ÿ¥ïW¿ÏŸ @      *1               U n i t D e s c r i p t o r . c s     î    Ä n     î    ¥wïW¿ÏŸ PõÓÇ§Ÿr6øÜ¿‰ŸπûïW¿ÏŸ¯       Û               U n i t D e s c r i p t o r . c s . m e t a   ü{    Ä n     î    Úÿ]ÁÏŸÉÔ˘ùØŸãbÁÏŸÁ¨À$ËÏŸ       ﬂ               U n i t P o r t D e s c r i p t i o n . c s . î    à x     î    ŒVñW¿ÏŸ PõÓÇ§Ÿ4åºÜ¿‰ŸŒVñW¿ÏŸ¯       Û                U n i t P o r t D e s c r i p t i o n . c s . m e t a °{    Ä l     î    ¿≤^ÁÏŸ ™Ô˘ùØŸãbÁÏŸÁ¨À$ËÏŸ       ﬂ               U n i t P o r t D e s c r i p t o r . c s . m î    à v     î    ]óW¿ÏŸ PõÓÇ§ŸF∫Ü¿‰Ÿb*óW¿ÏŸ¯       Û               U n i t P o r t D e s c r i p t o r . c s . m e t a                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              using System;
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+
+namespace Unity.VisualScripting
+{
+    [Analyser(typeof(IUnit))]
+    public class UnitAnalyser<TUnit> : Analyser<TUnit, UnitAnalysis>
+        where TUnit : class, IUnit
+    {
+        public UnitAnalyser(GraphReference reference, TUnit target) : base(reference, target) { }
+
+        public TUnit unit => target;
+
+        [Assigns]
+        protected bool IsEntered()
+        {
+            using (var recursion = Recursion.New(1))
+            {
+                return IsEntered(unit, recursion);
+            }
+        }
+
+        private static bool IsEntered(IUnit unit, Recursion recursion)
+        {
+            if (unit.isControlRoot)
+            {
+                return true;
+            }
+
+            foreach (var controlInput in unit.controlInputs)
+            {
+                if (!controlInput.isPredictable || controlInput.couldBeEntered)
+                {
+                    return true;
+                }
+            }
+
+            foreach (var valueOutput in unit.valueOutputs)
+            {
+                if (!recursion?.TryEnter(valueOutput) ?? false)
+                {
+                    continue;
+                }
+
+                var valueOutputEntered = valueOutput.validConnections.Any(c => IsEntered(c.destination.unit, recursion));
+
+                recursion?.Exit(valueOutput);
+
+                if (valueOutputEntered)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private string PortLabel(IUnitPort port)
+        {
+            return port.Description<UnitPortDescription>().label;
+        }
+
+        [Assigns]
+        protected virtual IEnumerable<Warning> Warnings()
+        {
+            var isEntered = IsEntered();
+
+            if (!unit.isDefined)
+            {
+                if (unit.definitionException != null)
+                {
+                    yield return Warning.Exception(unit.definitionException);
+                }
+                else if (!unit.canDefine)
+                {
+                    yield return Warning.Caution("Node is not properly configured.");
+                }
+            }
+            else if (unit is MissingType)
+            {
+                var formerType = $"{(unit as MissingType)?.formerType}";
+                formerType = string.IsNullOrEmpty(formerType) ? string.Empty : $"'{formerType}'";
+                yield return new ActionButtonWarning(
+                    WarningLevel.Error,
+                    $"The source script for this node type can't be found. Did you remove its script?\n" +
+                    $"Replace the node or add the {formerType} script file back to your project files.",
+                    "Replace Node",
+                    () =>
+                    { UnitWidgetHelper.ReplaceUnit(unit, reference, context, context.selection, new EventWrapper(unit)); }
+                );
+                yield break;
+            }
+
+            if (!isEntered)
+            {
+                yield return Warning.Info("Node is never entered.");
+            }
+
+            // Obsolete attribute is not inherited, so traverse the chain manually
+            var obsoleteAttribute = unit.GetType().AndHierarchy().FirstOrDefault(t => t.HasAttribute<ObsoleteAttribute>())?.GetAttribute<ObsoleteAttribute>();
+
+            if (obsoleteAttribute != null)
+            {
+                var unitName = BoltFlowNameUtility.UnitTitle(unit.GetType(), true, false);
+
+                if (obsoleteAttribute.Message != null)
+                {
+                    Debug.LogWarning($"\"{unitName}\" node is deprecated: {obsoleteAttribute.Message}");
+                    yield return Warning.Caution($"Deprecated: {obsoleteAttribute.Message}");
+                }
+                else
+                {
+                    Debug.LogWarning($"\"{unitName}\" node is deprecated.");
+                    yield return Warning.Caution("This node is deprecated.");
+                }
+            }
+
+            if (unit.isDefined)
+            {
+                foreach (var invalidInput in unit.invalidInputs)
+                {
+                    yield return Warning.Caution($"{PortLabel(invalidInput)} is not used by this unit.");
+                }
+
+                foreach (var invalidOutput in unit.invalidOutputs)
+                {
+                    yield return Warning.Caution($"{PortLabel(invalidOutput)} is not provided by this unit.");
+                }
+
+                foreach (var validPort in unit.validPorts)
+                {
+                    if (validPort.hasInvalidConnection)
+                    {
+                        yield return Warning.Caution($"{PortLabel(validPort)} has an invalid connection.");
+                    }
+                }
+
+#if UNITY_IOS || UNITY_ANDROID || UNITY_TVOS
+                if (unit is IMouseEventUnit)
+                {
+                    var graphName = string.IsNullOrEmpty(unit.graph.title) ? "A ScriptGraph" : $"The ScriptGraph {unit.graph.title}";
+                    var unitName = BoltFlowNameUtility.UnitTitle(unit.GetType(), true, false);
+                    Debug.LogWarning($"{graphName} contains a {unitName} node. Presence of MouseEvent nodes might impact performance on handheld devices.");
+                    yield return Warning.Caution("Presence of MouseEvent nodes might impact performance on handheld devices.");
+                }
+#endif
+            }
+
+            foreach (var controlInput in unit.controlInputs)
+            {
+                if (!controlInput.hasValidConnection)
+                {
+                    continue;
+                }
+
+                foreach (var relation in controlInput.relations)
+                {
+                    if (relation.source is ValueInput)
+                    {
+                        var valueInput = (ValueInput)relation.source;
+
+                        foreach (var warning in ValueInputWarnings(valueInput))
+                        {
+                            yield return warning;
+                        }
+                    }
+                }
+            }
+
+            foreach (var controlOutput in unit.controlOutputs)
+            {
+                if (!controlOutput.hasValidConnection)
+                {
+                    continue;
+                }
+
+                var controlInputs = controlOutput.relations.Select(r => r.source).OfType<ControlInput>();
+
+                var isTriggered = !controlInputs.Any() || controlInputs.Any(ci => !ci.isPredictable || ci.couldBeEntered);
+
+                foreach (var relation in controlOutput.relations)
+                {
+                    if (relation.source is ValueInput)
+                    {
+                        var valueInput = (ValueInput)relation.source;
+
+                        foreach (var warning in ValueInputWarnings(valueInput))
+                        {
+                            yield return warning;
+                        }
+                    }
+                }
+
+                if (isEntered && !isTriggered)
+                {
+                    yield return Warning.Caution($"{PortLabel(controlOutput)} is connected, but it is never triggered.");
+                }
+            }
+
+            foreach (var valueOutput in unit.valueOutputs)
+            {
+                if (!valueOutput.hasValidConnection)
+                {
+                    continue;
+                }
+
+                foreach (var relation in valueOutput.relations)
+                {
+                    if (relation.source is ControlInput)
+                    {
+                        var controlInput = (ControlInput)relation.source;
+
+                        if (isEntered && controlInput.isPredictable && !controlInput.couldBeEntered)
+                        {
+                            yield return Warning.Severe($"{PortLabel(controlInput)} is required, but it is never entered.");
+                        }
+                    }
+                    else if (relation.source is ValueInput)
+                    {
+                        var valueInput = (ValueInput)relation.source;
+
+                        foreach (var warning in ValueInputWarnings(valueInput))
+                        {
+                            yield return warning;
+                        }
+                    }
+                }
+            }
+        }
+
+        private IEnumerable<Warning> ValueInputWarnings(ValueInput valueInput)
+        {
+            // We can disable null reference check if no self is available
+            // and the port requires an owner, for example in macros.
+            var trustFutureOwner = valueInput.nullMeansSelf && reference.self == null;
+
+            var checkForNullReference = BoltFlow.Configuration.predictPotentialNullReferences && !valueInput.allowsNull && !trustFutureOwner;
+
+            var checkForMissingComponent = BoltFlow.Configuration.predictPotentialMissingComponents && typeof(Component).IsAssignableFrom(valueInput.type);
+
+            // Note that we cannot directly check the input's predicted value, because it
+            // will return false for safeguard specifically because it might be missing requirements.
+            // Therefore, we first check the connected value, then the default value.
+
+            // If the port is connected to a predictable output, use the connected value to perform checks.
+            if (valueInput.hasValidConnection)
+            {
+                var valueOutput = valueInput.validConnectedPorts.Single();
+
+                if (Flow.CanPredict(valueOutput, reference))
+                {
+                    if (checkForNullReference)
+                    {
+                        if (Flow.Predict(valueOutput, reference) == null)
+                        {
+                            yield return Warning.Severe($"{PortLabel(valueInput)} cannot be null.");
+                        }
+                    }
+
+                    if (checkForMissingComponent)
+                    {
+                        var connectedPredictedValue = Flow.Predict(valueOutput, reference);
+
+                        // This check is necessary, because the predicted value could be
+                        // incompatible as connections with non-guaranteed conversions are allowed.
+                        if (ConversionUtility.CanConvert(connectedPredictedValue, typeof(GameObject), true))
+                        {
+                            var gameObject = ConversionUtility.Convert<GameObject>(connectedPredictedValue);
+
+                            if (gameObject != null)
+                            {
+                                var component = (Component)ConversionUtility.Convert(gameObject, valueInput.type);
+
+                                if (component == null)
+                                {
+                                    yield return Warning.Caution($"{PortLabel(valueInput)} is missing a {valueInput.type.DisplayName()} component.");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // If the port isn't connected but has a default value, use the default value to perform checks.
+            else if (valueInput.hasDefaultValue)
+            {
+                if (checkForNullReference)
+                {
+                    if (Flow.Predict(valueInput, reference) == null)
+                    {
+                        yield return Warning.Severe($"{PortLabel(valueInput)} cannot be null.");
+                    }
+                }
+
+                if (checkForMissingComponent)
+                {
+                    var unconnectedPredictedValue = Flow.Predict(valueInput, reference);
+
+                    if (ConversionUtility.CanConvert(unconnectedPredictedValue, typeof(GameObject), true))
+                    {
+                        var gameObject = ConversionUtility.Convert<GameObject>(unconnectedPredictedValue);
+
+                        if (gameObject != null)
+                        {
+                            var component = (Component)ConversionUtility.Convert(gameObject, valueInput.type);
+
+                            if (component == null)
+                            {
+                                yield return Warning.Caution($"{PortLabel(valueInput)} is missing a {valueInput.type.DisplayName()} component.");
+                            }
+                        }
+                    }
+                }
+            }
+            // The value isn't connected and has no default value,
+            // therefore it is certain to be missing at runtime.
+            else
+            {
+                yield return Warning.Severe($"{PortLabel(valueInput)} is missing.");
+            }
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using UnityEngine;
+using UnityObject = UnityEngine.Object;
+
+namespace Unity.VisualScripting
+{
+    [Descriptor(typeof(IUnit))]
+    public class UnitDescriptor<TUnit> : Descriptor<TUnit, UnitDescription>, IUnitDescriptor
+        where TUnit : class, IUnit
+    {
+        public UnitDescriptor(TUnit target) : base(target)
+        {
+            unitType = unit.GetType();
+        }
+
+        protected Type unitType { get; }
+
+        public TUnit unit => target;
+
+        IUnit IUnitDescriptor.unit => unit;
+
+        private enum State
+        {
+            Defined,
+
+            NotDefined,
+
+            FailedToDefine
+        }
+
+        private State state
+        {
+            get
+            {
+                if (unit.isDefined)
+                {
+                    return State.Defined;
+                }
+                else if (unit.failedToDefine)
+                {
+                    return State.FailedToDefine;
+                }
+                else
+                {
+                    return State.NotDefined;
+                }
+            }
+        }
+
+
+        #region Reflected Description
+
+        static UnitDescriptor()
+        {
+            XmlDocumentation.loadComplete += FreeReflectedDescriptions;
+        }
+
+        public static void FreeReflectedDescriptions()
+        {
+            reflectedDescriptions.Clear();
+            reflectedInputDescriptions.Clear();
+            reflectedOutputDescriptions.Clear();
+        }
+
+        protected UnitDescription reflectedDescription
+        {
+            get
+            {
+                if (!reflectedDescriptions.TryGetValue(unitType, out var reflectedDescription))
+                {
+                    reflectedDescription = FetchReflectedDescription(unitType);
+                    reflectedDescriptions.Add(unitType, reflectedDescription);
+                }
+
+                return reflectedDescription;
+            }
+        }
+
+        protected UnitPortDescription ReflectedPortDescription(IUnitPort port)
+        {
+            if (port is IUnitInvalidPort)
+            {
+                return null;
+            }
+
+            if (port is IUnitInputPort)
+            {
+                if (!reflectedInputDescriptions.TryGetValue(unitType, out var _reflectedInputDescriptions))
+                {
+                    _reflectedInputDescriptions = FetchReflectedPortDescriptions<IUnitInputPort>(unitType);
+                    reflectedInputDescriptions.Add(unitType, _reflectedInputDescriptions);
+                }
+
+                if (_reflectedInputDescriptions.TryGetValue(port.key, out var portDescription))
+                {
+                    return portDescription;
+                }
+            }
+            else if (port is IUnitOutputPort)
+            {
+                if (!reflectedOutputDescriptions.TryGetValue(unitType, out var _reflectedOutputDescriptions))
+                {
+                    _reflectedOutputDescriptions = FetchReflectedPortDescriptions<IUnitOutputPort>(unitType);
+                    reflectedOutputDescriptions.Add(unitType, _reflectedOutputDescriptions);
+                }
+
+                if (_reflectedOutputDescriptions.TryGetValue(port.key, out var portDescription))
+                {
+                    return portDescription;
+                }
+            }
+
+            return null;
+        }
+
+        private static readonly Dictionary<Type, UnitDescription> reflectedDescriptions = new Dictionary<Type, UnitDescription>();
+
+        private static readonly Dictionary<Type, Dictionary<string, UnitPortDescription>> reflectedInputDescriptions = new Dictionary<Type, Dictionary<string, UnitPortDescription>>();
+
+        private static readonly Dictionary<Type, Dictionary<string, UnitPortDescription>> reflectedOutputDescriptions = new Dictionary<Type, Dictionary<string, UnitPortDescription>>();
+
+        private static UnitDescription FetchReflectedDescription(Type unitType)
+        {
+            var oldName = BoltFlowNameUtility.UnitPreviousTitle(unitType);
+            var prefix = string.IsNullOrEmpty(oldName) ? string.Empty : $"(Previously named {oldName}) ";
+
+            return new UnitDescription()
+            {
+                title = BoltFlowNameUtility.UnitTitle(unitType, false, true),
+                shortTitle = BoltFlowNameUtility.UnitTitle(unitType, true, true),
+                surtitle = unitType.GetAttribute<UnitSurtitleAttribute>()?.surtitle,
+                subtitle = unitType.GetAttribute<UnitSubtitleAttribute>()?.subtitle,
+                summary = prefix + unitType.Summary()
+            };
+        }
+
+        private static Dictionary<string, UnitPortDescription> FetchReflectedPortDescriptions<T>(Type unitType) where T : IUnitPort
+        {
+            var descriptions = new Dictionary<string, UnitPortDescription>();
+
+            foreach (var portMember in unitType.GetMembers().Where(member => typeof(T).IsAssignableFrom(member.GetAccessorType())))
+            {
+                var key = portMember.GetAttribute<PortKeyAttribute>()?.key ?? portMember.Name;
+
+                if (descriptions.ContainsKey(key))
+                {
+                    Debug.LogWarning("Duplicate reflected port description for: " + key);
+
+                    continue;
+                }
+
+                descriptions.Add(key, FetchReflectedPortDescription(portMember));
+            }
+
+            return descriptions;
+        }
+
+        private static UnitPortDescription FetchReflectedPortDescription(MemberInfo portMember)
+        {
+            return new UnitPortDescription()
+            {
+                label = portMember.GetAttribute<PortLabelAttribute>()?.label ?? portMember.HumanName(),
+                showLabel = !(portMember.HasAttribute<PortLabelHiddenAttribute>() || (portMember.GetAttribute<PortLabelAttribute>()?.hidden ?? false)),
+                summary = portMember.Summary(),
+                getMetadata = (unitMetadata) => unitMetadata[portMember.Name]
+            };
+        }
+
+        #endregion
+
+
+        #region Description
+
+        [Assigns]
+        public sealed override string Title()
+        {
+            switch (state)
+            {
+                case State.Defined: return DefinedTitle();
+                case State.NotDefined: return DefaultTitle();
+                case State.FailedToDefine: return ErrorTitle(unit.definitionException);
+                default: throw new UnexpectedEnumValueException<State>(state);
+            }
+        }
+
+        [Assigns]
+        public string ShortTitle()
+        {
+            switch (state)
+            {
+                case State.Defined: return DefinedShortTitle();
+                case State.NotDefined: return DefaultShortTitle();
+                case State.FailedToDefine: return ErrorShortTitle(unit.definitionException);
+                default: throw new UnexpectedEnumValueException<State>(state);
+            }
+        }
+
+        [Assigns]
+        public string Surtitle()
+        {
+            switch (state)
+            {
+                case State.Defined: return DefinedSurtitle();
+                case State.NotDefined: return DefaultSurtitle();
+                case State.FailedToDefine: return ErrorSurtitle(unit.definitionException);
+                default: throw new UnexpectedEnumValueException<State>(state);
+            }
+        }
+
+        [Assigns]
+        public string Subtitle()
+        {
+            switch (state)
+            {
+                case State.Defined: return DefinedSubtitle();
+                case State.NotDefined: return DefaultSubtitle();
+                case State.FailedToDefine: return ErrorSubtitle(unit.definitionException);
+                default: throw new UnexpectedEnumValueException<State>(state);
+            }
+        }
+
+        [Assigns]
+        public sealed override string Summary()
+        {
+            switch (state)
+            {
+                case State.Defined: return DefinedSummary();
+                case State.NotDefined: return DefaultSummary();
+                case State.FailedToDefine: return ErrorSummary(unit.definitionException);
+                default: throw new UnexpectedEnumValueException<State>(state);
+            }
+        }
+
+        [Assigns]
+        [RequiresUnityAPI]
+        public sealed override EditorTexture Icon()
+        {
+            switch (state)
+            {
+                case State.Defined: return DefinedIcon();
+                case State.NotDefined: return DefaultIcon();
+                case State.FailedToDefine: return ErrorIcon(unit.definitionException);
+                default: throw new UnexpectedEnumValueException<State>(state);
+            }
+        }
+
+        [Assigns]
+        [RequiresUnityAPI]
+        public IEnumerable<EditorTexture> Icons()
+        {
+            switch (state)
+            {
+                case State.Defined: return DefinedIcons();
+                case State.NotDefined: return DefaultIcons();
+                case State.FailedToDefine: return ErrorIcons(unit.definitionException);
+                default: throw new UnexpectedEnumValueException<State>(state);
+            }
+        }
+
+        protected virtual string DefinedTitle()
+        {
+            return reflectedDescription.title;
+        }
+
+        protected virtual string DefaultTitle()
+        {
+            return reflectedDescription.title;
+        }
+
+        protected virtual string ErrorTitle(Exception exception)
+        {
+            return reflectedDescription.title;
+        }
+
+        protected virtual string DefinedShortTitle()
+        {
+            return reflectedDescription.shortTitle;
+        }
+
+        protected virtual string DefaultShortTitle()
+        {
+            return reflectedDescription.shortTitle;
+        }
+
+        protected virtual string ErrorShortTitle(Exception exception)
+        {
+            return ErrorTitle(exception);
+        }
+
+        protected virtual string DefinedSurtitle()
+        {
+            return reflectedDescription.surtitle;
+        }
+
+        protected virtual string DefaultSurtitle()
+        {
+            return reflectedDescription.surtitle;
+        }
+
+        protected virtual string ErrorSurtitle(Exception exception)
+        {
+            return null;
+        }
+
+        protected virtual string DefinedSubtitle()
+        {
+            return reflectedDescription.subtitle;
+        }
+
+        protected virtual string DefaultSubtitle()
+        {
+            return reflectedDescription.subtitle;
+        }
+
+        protected virtual string ErrorSubtitle(Exception exception)
+        {
+            return null;
+        }
+
+        protected virtual string DefinedSummary()
+        {
+            return reflectedDescription.summary;
+        }
+
+        protected virtual string DefaultSummary()
+        {
+            return reflectedDescription.summary;
+        }
+
+        protected virtual string ErrorSummary(Exception exception)
+        {
+            return $"This node failed to define.\n\n{exception.DisplayName()}: {exception.Message}";
+        }
+
+        protected virtual EditorTexture DefinedIcon()
+        {
+            return unit.GetType().Icon();
+        }
+
+        protected virtual EditorTexture DefaultIcon()
+        {
+            return unit.GetType().Icon();
+        }
+
+        protected virtual EditorTexture ErrorIcon(Exception exception)
+        {
+            return BoltCore.Icons.errorState;
+        }
+
+        protected virtual IEnumerable<EditorTexture> DefinedIcons()
+        {
+            return Enumerable.Empty<EditorTexture>();
+        }
+
+        protected virtual IEnumerable<EditorTexture> DefaultIcons()
+        {
+            return Enumerable.Empty<EditorTexture>();
+        }
+
+        protected virtual IEnumerable<EditorTexture> ErrorIcons(Exception exception)
+        {
+            return Enumerable.Empty<EditorTexture>();
+        }
+
+        public void DescribePort(IUnitPort port, UnitPortDescription description)
+        {
+            description.getMetadata = (unitMetadata) => unitMetadata.StaticObject(port);
+
+            // Only defined nodes can have specific ports
+            if (state == State.Defined)
+            {
+                DefinedPort(port, description);
+            }
+        }
+
+        protected virtual void DefinedPort(IUnitPort port, UnitPortDescription description)
+        {
+            var reflectedPortDescription = ReflectedPortDescription(port);
+
+            if (reflectedPortDescription != null)
+            {
+                description.CopyFrom(reflectedPortDescription);
+            }
+        }
+
+        #endregion
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      using System;
+
+using UnityEngine;
+
+namespace Unity.PlasticSCM.Editor.UI
+{
+    internal class EditorVersion
+    {
+        internal int Year;
+        internal int Release;
+        internal int Update;
+
+        EditorVersion(int year, int release, int update)
+        {
+            Year = year;
+            Release = release;
+            Update = update;
+        }
+
+
+        public override string ToString()
+        {
+            return String.Format("{0}.{1}.{2}", Year, Release, Update);
+        }
+
+        internal static bool IsCurrentEditorOlderThan(string version)
+        {
+            return IsEditorOlderThan(Application.unityVersion, version);
+        }
+
+        internal static bool IsEditorOlderThan(string versionA, string versionB)
+        {
+#if UNITY_2017_1_OR_NEWER
+            var editorA = Parse(versionA);
+            var editorB = Parse(versionB);
+            if (editorA.Year == editorB.Year)
+            {
+                if (editorA.Release == editorB.Release)
+                {
+                    return editorA.Update < editorB.Update;
+                }
+                return editorA.Release < editorB.Release;
+            }
+            return editorA.Year < editorB.Year;
+#else
+            return false;
+#endif
+        }
+
+        static int ParseUpdateString(string version)
+        {
+            int pos = 0;
+            char[] characters = version.ToCharArray();
+            while (Char.IsDigit(characters[pos]))
+            {
+                ++pos;
+            }
+            return int.Parse(version.Substring(0, pos));
+        }
+
+        static EditorVersion Parse(string version)
+        {
+            var versions = version.Split('.');
+
+            var year = 0;
+            year = int.Parse(versions[0]);
+            var release = 0;
+            release = int.Parse(versions[1]);
+            var update = 0;
+            update = ParseUpdateString(versions[2]);
+
+            return new EditorVersion(year, release, update);
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          Ôªøusing Codice.Utils;
+using PlasticGui;
+
+namespace Unity.PlasticSCM.Editor.UI
+{
+    internal static class GetPlasticShortcut
+    {
+        internal static string ForOpen()
+        {
+            return PlasticLocalization.GetString(
+                PlasticLocalization.Name.UnityOpenShortcut);
+        }
+
+        internal static string ForDelete()
+        {
+            if (PlatformIdentifier.IsWindows())
+                return PlasticLocalization.GetString(
+                    PlasticLocalization.Name.UnityDeleteShortcutForWindows);
+
+            if (PlatformIdentifier.IsMac())
+                return PlasticLocalization.GetString(
+                    PlasticLocalization.Name.UnityDeleteShortcutForMacOS);
+
+            return string.Empty;
+        }
+
+        internal static string ForDiff()
+        {
+            return PlasticLocalization.GetString(
+                PlasticLocalization.Name.UnityDiffShortcut);
+        }
+
+        internal static string ForAssetDiff()
+        {
+            return PlasticLocalization.GetString(
+                PlasticLocalization.Name.UnityAssetDiffShortcut);
+        }
+
+        internal static string ForHistory()
+        {
+            if (PlatformIdentifier.IsWindows())
+                return PlasticLocalization.GetString(
+                    PlasticLocalization.Name.UnityHistoryShortcutForWindows);
+
+            if (PlatformIdentifier.IsMac())
+                return PlasticLocalization.GetString(
+                    PlasticLocalization.Name.UnityHistoryShortcutForMacOS);
+
+            return string.Empty;
+        }
+    }
+}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           INDX( 	 H€:           (   ¿  Ë       Ÿ t                 †{    à r     î    ∆'^ÁÏŸ`F˘ùØŸãbÁÏŸ3rÀ$ËÏŸ∞      ©               C u s t o m E v e n t D e s c r i p t o r . c s . m e î    ê |     î    p%òW¿ÏŸ PõÓÇ§ŸZU∂Ü¿‰ŸwLòW¿ÏŸ¯       Û                C u s t o m E v e n t D e s c r i p t o r . c s . m e t a     £{    Ä n     î    ¿≤^ÁÏŸ`F˘ùØŸãbÁÏŸKÀ$ËÏŸ`      ^               E v e n t U n i t D e s c r i p t o r . c s . î    à x     î    'ôW¿ÏŸ PõÓÇ§ Y«≥Ü¿‰Ÿ'ôW¿ÏŸ¯       Û                E v e n t U n i t D e s c r i p t o r . c s . m e t a ¢{    x f     î    ¿≤^ÁÏŸ`F˘ùØŸãbÁÏŸÁ¨À$ËÏŸ8      5               E v e n t U n i t W i d g e t . c s . î    Ä p     î    ∞ôW¿ÏŸ PõÓÇ§ŸËÀ±Ü¿‰Ÿ◊ôW¿ÏŸ¯       Û                E v e n t U n i t W i d g e t . c s . m e t a §{    ê ~     î    »_ÁÏŸ∞	Ò˘ùØŸãbÁÏŸÁ¨À$ËÏŸà      Å               G l o b a l M e s s a g e L i s t e n e r E d i t o r . c s .  î    ò à     î    gÖöW¿ÏŸ PõÓÇ§Ÿs“ØÜ¿‰Ÿl¨öW¿ÏŸ¯       Û               # G l o b a l M e s s a g e L i s t e n e r E d i t o r . c s . m e t a ¶{    à r     î    ”v_ÁÏŸ•Ò˘ùØŸãbÁÏŸ3rÀ$ËÏŸx      u               M e s s a g e L i s t e n e r E d i t o r . c s . m e "î    ê |     î    bõW¿ÏŸ PõÓÇ§Ÿsµ≠Ü¿‰ŸbõW¿ÏŸ¯       Û                M e s s a g e L i s t e n e r E d i t o r . c s . m e t a     •{    ê Ä     î    »_ÁÏŸ•Ò˘ùØŸ¯=bÁÏŸKÀ$ËÏŸh      b               T r i g g e r C u s  o m E v e n t D e s c r i p t o r . c s $î    † ä     î    ‡úW¿ÏŸ PõÓÇ§Ÿ´Ü¿‰Ÿï4úW¿ÏŸ¯       Û               $ T r i g g e r C u s t o m E v e n t D e
